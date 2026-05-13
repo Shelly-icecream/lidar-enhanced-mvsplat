@@ -209,3 +209,64 @@ test.compute_scores=true
 ## Acknowledgements
 
 The project is largely based on [pixelSplat](https://github.com/dcharatan/pixelsplat) and has incorporated numerous code snippets from [UniMatch](https://github.com/autonomousvision/unimatch). Many thanks to these two projects for their excellent contributions!
+
+
+
+
+
+
+
+# 当前状态（Current Status）
+
+- 已完成：
+  - ✅ MVSplat 在 re10k 跑通
+  - ✅ nuScenes 数据加载正常
+  - ✅ 时序输入（t-3,t-2,t-1→t）可用
+  - ⏳ 正在做：时序适配训练（无 LiDAR）
+
+---
+
+# 当前问题（Current Problems）
+
+- 训练到 3000 step，但：
+  - ❗ 没有 checkpoint（已修）
+  - ❗ 不确定是否已经收敛
+
+---
+
+# 下一步（Next Step）⭐
+
+👉 目标：引入 LiDAR prior 到 cost volume
+
+具体做：
+
+1. 检查：
+   - lidar_depth shape 是否正确
+   - lidar_mask 是否对齐图像
+
+2. 实现：
+   - build_lidar_prior_volume()
+
+3. 融合：
+   - depth_logits += λ * lidar_prior
+
+---
+
+# 实验记录（Experiment Log）
+
+- step=3000
+- loss ≈ 0.02
+- 现象：
+  - 图像质量一般
+  - 时序稍微稳定
+
+---
+
+# 下次启动做什么（Quick Start）🚀
+
+👉 直接做：
+
+1. 打印 lidar_depth
+2. 写 lidar_prior_volume
+3. 插入 encoder forward
+

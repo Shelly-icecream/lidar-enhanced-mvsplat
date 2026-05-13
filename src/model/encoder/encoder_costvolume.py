@@ -175,7 +175,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
         extra_info["scene_names"] = scene_names
         gpp = self.cfg.gaussians_per_pixel
-        depths, densities, raw_gaussians = self.depth_predictor(
+        depths, densities, raw_gaussians,lidar_loss_before = self.depth_predictor(
             in_feats,
             context["intrinsics"],
             context["extrinsics"],
@@ -185,6 +185,8 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             deterministic=deterministic,
             extra_info=extra_info,
             cnn_features=cnn_features,
+            lidar_depth=context.get("lidar_depth", None),
+            lidar_mask=context.get("lidar_mask", None),
         )
 
         # Convert the features and depths into Gaussians.
@@ -227,7 +229,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         # Optionally apply a per-pixel opacity.
         opacity_multiplier = 1
 
-        return Gaussians(
+        output_gaussians = Gaussians(
             rearrange(
                 gaussians.means,
                 "b v r srf spp xyz -> b (v r srf spp) xyz",
@@ -245,6 +247,9 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 "b v r srf spp -> b (v r srf spp)",
             ),
         )
+        output_gaussians.lidar_loss_before = lidar_loss_before
+
+        return output_gaussians
 
     def get_data_shim(self) -> DataShim:
         def data_shim(batch: BatchedExample) -> BatchedExample:

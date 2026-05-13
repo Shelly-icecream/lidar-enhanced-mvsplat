@@ -14,7 +14,7 @@ colorspacious
 matplotlib
 moviepy
 imageio
-git+https://github.com/dcharatan/diff-gaussian-rasterization-modified
+
 timm
 dacite
 lpips

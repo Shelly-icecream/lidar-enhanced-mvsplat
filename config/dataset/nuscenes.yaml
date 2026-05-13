@@ -1,0 +1,26 @@
+defaults:
+  - view_sampler: bounded
+
+name: nuscenes
+root: datasets/nuscenes
+version: v1.0-mini
+
+augment: false
+
+image_shape: [176, 320]
+background_color: [0.0, 0.0, 0.0]
+cameras_are_circular: false
+overfit_to_scene: null
+
+max_fov: 120.0
+skip_bad_shape: true
+
+near: 0.1
+far: 80.0
+
+use_keyframe_only: true
+
+camera_name: CAM_FRONT
+num_context_views: 2
+num_target_views: 1
+frame_stride: 1

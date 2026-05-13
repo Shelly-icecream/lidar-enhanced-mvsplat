@@ -5,7 +5,80 @@ from einops import rearrange, repeat
 
 from ..backbone.unimatch.geometry import coords_grid
 from .ldm_unet.unet import UNetModel
+def build_lidar_visibility_prior(
+    lidar_depth,
+    lidar_mask,
+    disp_candi_curr,
+    target_hw,
+    lambda_surface=1.0,
+    lambda_free=0.3,
+    sigma_disp=0.12,
+    free_margin=0.5,
+    eps=1e-6,
+):
+    """
+    Args:
+        lidar_depth: [B, V, 1, H, W]
+        lidar_mask:  [B, V, 1, H, W]
+        disp_candi_curr: [V*B, D, 1, 1]
+        target_hw: (h, w), same as depth_logits
 
+    Returns:
+        lidar_bias: [V*B, D, h, w]
+    """
+    lidar_depth = lidar_depth.to(
+        device=disp_candi_curr.device,
+        dtype=disp_candi_curr.dtype,
+    )
+    lidar_mask = lidar_mask.to(
+        device=disp_candi_curr.device,
+        dtype=disp_candi_curr.dtype,
+    )
+    Hf, Wf = target_hw
+
+    # [B,V,1,H,W] -> [V*B,1,H,W]
+    lidar_depth = rearrange(lidar_depth, "b v c h w -> (v b) c h w")
+    lidar_mask = rearrange(lidar_mask, "b v c h w -> (v b) c h w")
+
+    # 下采样到 cost volume 分辨率
+    lidar_depth_low = F.interpolate(
+        lidar_depth,
+        size=(Hf, Wf),
+        mode="nearest",
+    )
+
+    lidar_mask_low = F.interpolate(
+        lidar_mask,
+        size=(Hf, Wf),
+        mode="nearest",
+    )
+    lidar_mask_low = (lidar_mask_low > 0.5).float()
+    
+    # LiDAR inverse depth
+    lidar_disp_low = 1.0 / lidar_depth_low.clamp(min=eps)
+
+    # candidate inverse depth: [V*B, D, 1, 1]
+    disp_candi = disp_candi_curr
+
+    # candidate real depth: [V*B, D, 1, 1]
+    depth_candi = 1.0 / disp_candi.clamp(min=eps)
+
+    # Surface Attraction
+    surface_prior = torch.exp(
+        -0.5 * ((disp_candi - lidar_disp_low) / sigma_disp) ** 2
+    )
+    surface_prior = surface_prior * lidar_mask_low
+
+    # Free-space Suppression
+    free_prior = (
+        depth_candi < (lidar_depth_low - free_margin)
+    ).float()
+    free_prior = free_prior * lidar_mask_low
+    
+    lidar_bias = lambda_surface * surface_prior - lambda_free * free_prior
+    
+    
+    return lidar_bias, lidar_mask_low,lidar_disp_low
 
 def warp_with_pose_depth_candidates(
     feature1,
@@ -270,10 +343,12 @@ class DepthPredictorMultiView(nn.Module):
         deterministic=True,
         extra_info=None,
         cnn_features=None,
+        lidar_depth=None,
+        lidar_mask=None,
     ):
         """IMPORTANT: this model is in (v b), NOT (b v), due to some historical issues.
         keep this in mind when performing any operation related to the view dim"""
-
+        
         # format the input
         b, v, c, h, w = features.shape
         feat_comb_lists, intr_curr, pose_curr_lists, disp_candi_curr = (
@@ -326,14 +401,53 @@ class DepthPredictorMultiView(nn.Module):
             raw_correlation = raw_correlation + self.regressor_residual(
                 raw_correlation_in
             )
+        depth_logits_vis = self.depth_head_lowres(raw_correlation)  
+        pdf_vis = F.softmax(depth_logits_vis, dim=1)
+        coarse_disps_vis = (disp_candi_curr * pdf_vis).sum(dim=1, keepdim=True)
+
+        temperature = 5.0
+        lidar_loss_before = None
+        lidar_loss_after = None
+        if lidar_depth is not None and lidar_mask is not None:
+            lidar_bias, lidar_mask_low,lidar_disp_low = build_lidar_visibility_prior(
+                lidar_depth=lidar_depth,              # [B,V,1,H,W]
+                lidar_mask=lidar_mask,                # [B,V,1,H,W]
+                disp_candi_curr=disp_candi_curr,      # [v*b,D,1,1]
+                target_hw=depth_logits_vis.shape[-2:],    # (h,w)
+                lambda_surface=10.0,
+                lambda_free=2.0,
+                sigma_disp=0.12,
+                free_margin=0.5,
+            )
+            
+            depth_logits_calibrated = (
+                depth_logits_vis * (1.0 - lidar_mask_low)
+                 + (depth_logits_vis / temperature) * lidar_mask_low
+             )
+
+            depth_logits_lidar = depth_logits_calibrated + lidar_bias
+            
+            mask = lidar_mask_low.bool()
+            if mask.sum() > 0:
+                lidar_loss_before = (coarse_disps_vis - lidar_disp_low).abs()[mask].mean()
+                print("coarse disp loss before:", lidar_loss_before)
+
+        else:
+            depth_logits_lidar = depth_logits_vis 
 
         # softmax to get coarse depth and density
-        pdf = F.softmax(
-            self.depth_head_lowres(raw_correlation), dim=1
-        )  # [2xB, D, H, W]
+        pdf = F.softmax(depth_logits_lidar, dim=1)  # [v*b, D, h, w]
+        
         coarse_disps = (disp_candi_curr * pdf).sum(
             dim=1, keepdim=True
         )  # (vb, 1, h, w)
+        if lidar_depth is not None and lidar_mask is not None:
+            mask = lidar_mask_low.bool()
+            if mask.sum() > 0:
+                lidar_loss_after = (coarse_disps - lidar_disp_low).abs()[mask].mean()
+                print("coarse disp loss after:", lidar_loss_after)
+                print("delta:", lidar_loss_after - lidar_loss_before)
+
         pdf_max = torch.max(pdf, dim=1, keepdim=True)[0]  # argmax
         pdf_max = F.interpolate(pdf_max, scale_factor=self.upscale_factor)
         fullres_disps = F.interpolate(
@@ -404,4 +518,5 @@ class DepthPredictorMultiView(nn.Module):
                 srf=1,
             )
 
-        return depths, densities, raw_gaussians
+        return depths, densities, raw_gaussians,lidar_loss_before
+    

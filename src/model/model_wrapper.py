@@ -107,10 +107,19 @@ class ModelWrapper(LightningModule):
 
         # Set up the model.
         self.encoder = encoder
+    
+        if hasattr(self.encoder, "backbone"):
+            print("==> Freeze encoder.backbone for nuScenes visual-only fine-tuning")
+            for p in self.encoder.backbone.parameters():
+                p.requires_grad = False
         self.encoder_visualizer = encoder_visualizer
         self.decoder = decoder
         self.data_shim = get_data_shim(self.encoder)
         self.losses = nn.ModuleList(losses)
+        
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total = sum(p.numel() for p in self.parameters())
+        print(f"==> Trainable params: {trainable / 1e6:.2f}M / {total / 1e6:.2f}M")
 
         # This is used for testing.
         self.benchmarker = Benchmarker()
@@ -128,6 +137,7 @@ class ModelWrapper(LightningModule):
         gaussians = self.encoder(
             batch["context"], self.global_step, False, scene_names=batch["scene"]
         )
+        lidar_loss_before = getattr(gaussians, "lidar_loss_before", None)
         output = self.decoder.forward(
             gaussians,
             batch["target"]["extrinsics"],
@@ -152,6 +162,12 @@ class ModelWrapper(LightningModule):
             loss = loss_fn.forward(output, batch, gaussians, self.global_step)
             self.log(f"loss/{loss_fn.name}", loss)
             total_loss = total_loss + loss
+        lambda_lidar = 0.01
+
+        if lidar_loss_before is not None:
+            total_loss = total_loss + lambda_lidar * lidar_loss_before
+            self.log("loss/lidar_before", lidar_loss_before)
+            self.log("loss/lidar_weighted", lambda_lidar * lidar_loss_before)
         self.log("loss/total", total_loss)
 
         if (
@@ -278,6 +294,7 @@ class ModelWrapper(LightningModule):
 
     @rank_zero_only
     def validation_step(self, batch, batch_idx):
+        return
         batch: BatchedExample = self.data_shim(batch)
 
         if self.global_rank == 0:
