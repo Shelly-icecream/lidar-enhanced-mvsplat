@@ -58,6 +58,15 @@ class EncoderCostVolumeCfg:
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
+    use_lidar_bias: bool
+    use_lidar_loss: bool
+    lidar_loss_weight: float
+
+    lidar_lambda_surface: float
+    lidar_lambda_free: float
+    lidar_sigma_disp: float
+    lidar_free_margin: float
+    lidar_temperature: float
 
 
 class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
@@ -122,6 +131,14 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             wo_depth_refine=cfg.wo_depth_refine,
             wo_cost_volume=cfg.wo_cost_volume,
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
+            
+            use_lidar_bias=cfg.use_lidar_bias,
+            use_lidar_loss=cfg.use_lidar_loss,
+            lidar_lambda_surface=cfg.lidar_lambda_surface,
+            lidar_lambda_free=cfg.lidar_lambda_free,
+            lidar_sigma_disp=cfg.lidar_sigma_disp,
+            lidar_free_margin=cfg.lidar_free_margin,
+            lidar_temperature=cfg.lidar_temperature,
         )
 
     def map_pdf_to_opacity(

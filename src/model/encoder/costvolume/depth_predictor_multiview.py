@@ -217,6 +217,14 @@ class DepthPredictorMultiView(nn.Module):
         wo_depth_refine=False,
         wo_cost_volume=False,
         wo_cost_volume_refine=False,
+        
+        use_lidar_bias=False,
+        use_lidar_loss=False,
+        lidar_lambda_surface=10.0,
+        lidar_lambda_free=2.0,
+        lidar_sigma_disp=0.12,
+        lidar_free_margin=0.5,
+        lidar_temperature=5.0,
         **kwargs,
     ):
         super(DepthPredictorMultiView, self).__init__()
@@ -230,6 +238,14 @@ class DepthPredictorMultiView(nn.Module):
         self.wo_cost_volume = wo_cost_volume
         # Table 3: w/o U-Net
         self.wo_cost_volume_refine = wo_cost_volume_refine
+        self.use_lidar_bias = use_lidar_bias
+        self.use_lidar_loss = use_lidar_loss
+
+        self.lidar_lambda_surface = lidar_lambda_surface
+        self.lidar_lambda_free = lidar_lambda_free
+        self.lidar_sigma_disp = lidar_sigma_disp
+        self.lidar_free_margin = lidar_free_margin
+        self.lidar_temperature = lidar_temperature
 
         # Cost volume refinement: 2D U-Net
         input_channels = feature_channels if wo_cost_volume else (num_depth_candidates + feature_channels)
@@ -405,10 +421,15 @@ class DepthPredictorMultiView(nn.Module):
         pdf_vis = F.softmax(depth_logits_vis, dim=1)
         coarse_disps_vis = (disp_candi_curr * pdf_vis).sum(dim=1, keepdim=True)
 
-        temperature = 5.0
         lidar_loss_before = None
         lidar_loss_after = None
-        if lidar_depth is not None and lidar_mask is not None:
+        lidar_mask_low = None
+        lidar_disp_low = None
+        
+        has_lidar = lidar_depth is not None and lidar_mask is not None
+        need_lidar = has_lidar and (self.use_lidar_bias or self.use_lidar_loss)
+
+        if need_lidar:
             lidar_bias, lidar_mask_low,lidar_disp_low = build_lidar_visibility_prior(
                 lidar_depth=lidar_depth,              # [B,V,1,H,W]
                 lidar_mask=lidar_mask,                # [B,V,1,H,W]
@@ -419,19 +440,20 @@ class DepthPredictorMultiView(nn.Module):
                 sigma_disp=0.12,
                 free_margin=0.5,
             )
-            
-            depth_logits_calibrated = (
-                depth_logits_vis * (1.0 - lidar_mask_low)
-                 + (depth_logits_vis / temperature) * lidar_mask_low
-             )
-
-            depth_logits_lidar = depth_logits_calibrated + lidar_bias
-            
             mask = lidar_mask_low.bool()
-            if mask.sum() > 0:
+            # bias only changes the forward depth logits.
+            if self.use_lidar_bias:
+                depth_logits_calibrated = (
+                    depth_logits_vis * (1.0 - lidar_mask_low) + (depth_logits_vis / temperature) * lidar_mask_low
+             )
+                depth_logits_lidar = depth_logits_calibrated + lidar_bias
+            else:
+                depth_logits_lidar = depth_logits_vis
+            # loss only uses pure visual prediction before LiDAR bias.
+            if self.use_lidar_loss and mask.sum() > 0:
                 lidar_loss_before = (coarse_disps_vis - lidar_disp_low).abs()[mask].mean()
                 print("coarse disp loss before:", lidar_loss_before)
-
+            
         else:
             depth_logits_lidar = depth_logits_vis 
 
@@ -441,12 +463,13 @@ class DepthPredictorMultiView(nn.Module):
         coarse_disps = (disp_candi_curr * pdf).sum(
             dim=1, keepdim=True
         )  # (vb, 1, h, w)
-        if lidar_depth is not None and lidar_mask is not None:
+        if need_lidar and self.use_lidar_bias and lidar_mask_low is not None:
             mask = lidar_mask_low.bool()
             if mask.sum() > 0:
                 lidar_loss_after = (coarse_disps - lidar_disp_low).abs()[mask].mean()
                 print("coarse disp loss after:", lidar_loss_after)
-                print("delta:", lidar_loss_after - lidar_loss_before)
+                if lidar_loss_before is not None:
+                    print("delta:", lidar_loss_after - lidar_loss_before)
 
         pdf_max = torch.max(pdf, dim=1, keepdim=True)[0]  # argmax
         pdf_max = F.interpolate(pdf_max, scale_factor=self.upscale_factor)

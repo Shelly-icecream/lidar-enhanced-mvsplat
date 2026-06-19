@@ -32,6 +32,15 @@ trainer:
 # ----- model params -----
 model:
   encoder:
+    use_lidar_bias: false
+    use_lidar_loss: false
+    lidar_loss_weight: 0.0
+
+    lidar_lambda_surface: 10.0
+    lidar_lambda_free: 2.0
+    lidar_sigma_disp: 0.12
+    lidar_free_margin: 0.5
+    lidar_temperature: 5.0
     num_depth_candidates: 128
     costvolume_unet_feat_dim: 128
     costvolume_unet_channel_mult: [1, 1, 1]

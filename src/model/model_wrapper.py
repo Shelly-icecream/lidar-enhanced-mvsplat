@@ -162,9 +162,11 @@ class ModelWrapper(LightningModule):
             loss = loss_fn.forward(output, batch, gaussians, self.global_step)
             self.log(f"loss/{loss_fn.name}", loss)
             total_loss = total_loss + loss
-        lambda_lidar = 0.01
+        cfg = get_cfg()
+        use_lidar_loss = cfg.model.encoder.use_lidar_loss
+        lambda_lidar = cfg.model.encoder.lidar_loss_weight
 
-        if lidar_loss_before is not None:
+        if use_lidar_loss and lidar_loss_before is not None and lambda_lidar > 0:
             total_loss = total_loss + lambda_lidar * lidar_loss_before
             self.log("loss/lidar_before", lidar_loss_before)
             self.log("loss/lidar_weighted", lambda_lidar * lidar_loss_before)
