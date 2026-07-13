@@ -40,3 +40,15 @@ wo_cost_volume: false          # Table 3: w/o cost volume
 wo_backbone_cross_attn: false  # Table 3: w/o cross-view attention
 wo_cost_volume_refine: false   # Table 3: w/o U-Net
 use_epipolar_trans: false      # Table B: w/ Epipolar Transformer
+
+# LiDAR guidance
+use_lidar_bias: false
+use_lidar_loss: false
+lidar_loss_weight: 0.01
+
+# LiDAR visibility prior params
+lidar_lambda_surface: 10.0
+lidar_lambda_free: 2.0
+lidar_sigma_disp: 0.12
+lidar_free_margin: 0.5
+lidar_temperature: 5.0

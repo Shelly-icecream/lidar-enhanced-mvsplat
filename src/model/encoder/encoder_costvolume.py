@@ -61,7 +61,6 @@ class EncoderCostVolumeCfg:
     use_lidar_bias: bool
     use_lidar_loss: bool
     lidar_loss_weight: float
-
     lidar_lambda_surface: float
     lidar_lambda_free: float
     lidar_sigma_disp: float
