@@ -46,7 +46,7 @@ class DatasetRE10k(IterableDataset):
 
     to_tensor: tf.ToTensor
     chunks: list[Path]
-    near: float = 0.1
+    near: float = 1.0
     far: float = 1000.0
 
     def __init__(

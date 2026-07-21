@@ -15,7 +15,7 @@ overfit_to_scene: null
 max_fov: 120.0
 skip_bad_shape: true
 
-near: 0.1
+near: 1.0
 far: 80.0
 
 use_keyframe_only: true

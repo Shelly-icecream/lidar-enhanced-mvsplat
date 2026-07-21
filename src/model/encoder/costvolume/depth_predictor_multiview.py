@@ -573,9 +573,9 @@ class DepthPredictorMultiView(nn.Module):
                 disp_candi_curr=disp_candi_curr,      # [v*b,D,1,1]
                 target_hw=depth_logits_vis.shape[-2:],    # (h,w)
                 lambda_surface=self.lidar_lambda_surface,
-    lambda_free=self.lidar_lambda_free,
-    sigma_disp=self.lidar_sigma_disp,
-    free_margin=self.lidar_free_margin,
+                lambda_free=self.lidar_lambda_free,
+                sigma_disp=self.lidar_sigma_disp,
+                free_margin=self.lidar_free_margin,
             )
             mask = lidar_mask_low.bool()
             # bias only changes the forward depth logits.
@@ -627,11 +627,9 @@ class DepthPredictorMultiView(nn.Module):
                         coarse_disps - lidar_disp_low
                     ).abs()[valid_low]
 
-                    # bias 实际将预测逆深度改变了多少
-                    coarse_change_low = (
-                        coarse_disps - coarse_disps_vis
-                    ).abs()[valid_low]
-
+                    # 误差得到了多大改善
+                    gain=(err_vis_low.mean() - err_bias_low.mean()).item()
+                    
                     improve_ratio_low = (
                         err_bias_low < err_vis_low
                     ).float().mean()
@@ -645,8 +643,7 @@ class DepthPredictorMultiView(nn.Module):
                         f"valid_cells={int(valid_low.sum().item())}, "
                         f"E_visual={err_vis_low.mean().item():.8f}, "
                         f"E_bias={err_bias_low.mean().item():.8f}, "
-                        f"gain={(err_vis_low.mean()- err_bias_low.mean()).item():.8f}, "
-                        f"disp_change={coarse_change_low.mean().item():.8f}, "
+                        f"gain={gain:.8f}, "
                         f"improve_ratio={improve_ratio_low.item():.4f}, "
                         f"worsen_ratio={worsen_ratio_low.item():.4f}"
                     )

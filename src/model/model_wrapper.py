@@ -307,69 +307,7 @@ class ModelWrapper(LightningModule):
             "lidar_diag",
             None,
         )
-
-        if diag is not None and diag["num_points"] > 0:
-            n = diag["num_points"]
-
-            err_visual = (
-                diag["vis_error_sum"] / n
-            )
-
-            err_bias = (
-                diag["bias_error_sum"] / n
-            )
-
-            err_final = (
-                diag["final_error_sum"] / n
-            )
-
-            mean_refine_delta = (
-                diag["refine_delta_sum"] / n
-            )
-
-            improve_ratio = (
-                diag["refine_improve_count"] / n
-            )
-
-            worsen_ratio = (
-                diag["refine_worsen_count"] / n
-            )
-
-            # bias 对视觉 coarse depth 带来的收益
-            bias_gain = (
-                err_visual - err_bias
-            )
-
-            # refinement 相对于 bias coarse 的变化
-            # > 0 表示 refinement 使 LiDAR 误差变大
-            refine_damage = (
-                err_final - err_bias
-            )
-
-            # 保留比例：
-            # 1   = bias 改善完全保留
-            # 0   = bias 改善完全被抵消
-            # < 0 = final 比原视觉还差
-            # > 1 = refinement 进一步改善
-            if bias_gain > 1e-12:
-                retained_ratio = (
-                    err_visual - err_final
-                ) / bias_gain
-            else:
-                retained_ratio = float("nan")
-
-            print("\n========== LiDAR Refinement Diagnostics ==========")
-            print(f"LiDAR points          : {n}")
-            print(f"E_visual_coarse       : {err_visual:.8f}")
-            print(f"E_bias_coarse         : {err_bias:.8f}")
-            print(f"E_final_refined       : {err_final:.8f}")
-            print(f"bias_gain             : {bias_gain:.8f}")
-            print(f"refine_damage         : {refine_damage:.8f}")
-            print(f"retained_ratio        : {retained_ratio:.4f}")
-            print(f"mean_abs_refine_delta : {mean_refine_delta:.8f}")
-            print(f"refine_improve_ratio  : {improve_ratio:.4f}")
-            print(f"refine_worsen_ratio   : {worsen_ratio:.4f}")
-            print("==================================================\n")        
+   
 
     @rank_zero_only
     def validation_step(self, batch, batch_idx):

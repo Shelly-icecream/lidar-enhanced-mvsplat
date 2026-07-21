@@ -27,7 +27,7 @@ class DatasetNuScenesCfg(DatasetCfgCommon):
     root: Path
     version: str = "v1.0-mini"
     augment: bool = False
-    near: float = 0.1
+    near: float = 1.0
     far: float = 80.0
     skip_bad_shape: bool = True
     max_fov: float = 120.0

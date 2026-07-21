@@ -68,7 +68,7 @@ dataset:
   root: datasets/nuscenes
   version: v1.0-mini
 
-  near: 0.1
+  near: 1.0
   far: 80.0
 
   augment: false
