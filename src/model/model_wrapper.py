@@ -132,12 +132,18 @@ class ModelWrapper(LightningModule):
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         _, _, _, h, w = batch["target"]["image"].shape
+        print_lidar_stats = batch_idx == self.trainer.num_training_batches - 1
 
         # Run the model.
         gaussians = self.encoder(
-            batch["context"], self.global_step, False, scene_names=batch["scene"]
+            batch["context"],
+            self.global_step,
+            False,
+            scene_names=batch["scene"],
+            print_lidar_stats=print_lidar_stats,
         )
-        lidar_loss_before = getattr(gaussians, "lidar_loss_before", None)
+        lidar_coarse_loss = getattr(gaussians, "lidar_coarse_loss", None)
+        lidar_refine_loss = getattr(gaussians, "lidar_refine_loss", None)
         output = self.decoder.forward(
             gaussians,
             batch["target"]["extrinsics"],
@@ -163,13 +169,20 @@ class ModelWrapper(LightningModule):
             self.log(f"loss/{loss_fn.name}", loss)
             total_loss = total_loss + loss
         cfg = get_cfg()
-        use_lidar_loss = cfg.model.encoder.use_lidar_loss
+        use_lidar_coarse_loss = cfg.model.encoder.use_lidar_coarse_loss
+        use_lidar_refine_loss = cfg.model.encoder.use_lidar_refine_loss
         lambda_lidar = cfg.model.encoder.lidar_loss_weight
+        lambda_lidar_final = cfg.model.encoder.lidar_final_loss_weight
 
-        if use_lidar_loss and lidar_loss_before is not None and lambda_lidar > 0:
-            total_loss = total_loss + lambda_lidar * lidar_loss_before
-            self.log("loss/lidar_before", lidar_loss_before)
-            self.log("loss/lidar_weighted", lambda_lidar * lidar_loss_before)
+        if use_lidar_coarse_loss and lidar_coarse_loss is not None and lambda_lidar > 0:
+            total_loss = total_loss + lambda_lidar * lidar_coarse_loss
+            self.log("loss/lidar_coarse", lidar_coarse_loss)
+            self.log("loss/lidar_coarse_weighted", lambda_lidar * lidar_coarse_loss)
+
+        if use_lidar_refine_loss and lidar_refine_loss is not None and lambda_lidar_final > 0:
+            total_loss = total_loss + lambda_lidar_final * lidar_refine_loss
+            self.log("loss/lidar_refine", lidar_refine_loss)
+            self.log("loss/lidar_refine_weighted", lambda_lidar_final * lidar_refine_loss)
         self.log("loss/total", total_loss)
 
         if (

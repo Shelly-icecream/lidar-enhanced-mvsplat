@@ -59,8 +59,10 @@ class EncoderCostVolumeCfg:
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
     use_lidar_bias: bool
-    use_lidar_loss: bool
+    use_lidar_coarse_loss: bool
+    use_lidar_refine_loss: bool
     lidar_loss_weight: float
+    lidar_final_loss_weight: float
     lidar_lambda_surface: float
     lidar_lambda_free: float
     lidar_sigma_disp: float
@@ -132,7 +134,8 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
             
             use_lidar_bias=cfg.use_lidar_bias,
-            use_lidar_loss=cfg.use_lidar_loss,
+            use_lidar_coarse_loss=cfg.use_lidar_coarse_loss,
+            use_lidar_refine_loss=cfg.use_lidar_refine_loss,
             lidar_lambda_surface=cfg.lidar_lambda_surface,
             lidar_lambda_free=cfg.lidar_lambda_free,
             lidar_sigma_disp=cfg.lidar_sigma_disp,
@@ -162,6 +165,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         deterministic: bool = False,
         visualization_dump: Optional[dict] = None,
         scene_names: Optional[list] = None,
+        print_lidar_stats: bool = False,
     ) -> Gaussians:
         device = context["image"].device
         b, v, _, h, w = context["image"].shape
@@ -190,8 +194,9 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         extra_info = {}
         extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
         extra_info["scene_names"] = scene_names
+        extra_info["print_lidar_stats"] = print_lidar_stats
         gpp = self.cfg.gaussians_per_pixel
-        depths, densities, raw_gaussians,lidar_loss_before = self.depth_predictor(
+        depths, densities, raw_gaussians, lidar_coarse_loss, lidar_refine_loss = self.depth_predictor(
             in_feats,
             context["intrinsics"],
             context["extrinsics"],
@@ -263,7 +268,8 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 "b v r srf spp -> b (v r srf spp)",
             ),
         )
-        output_gaussians.lidar_loss_before = lidar_loss_before
+        output_gaussians.lidar_coarse_loss = lidar_coarse_loss
+        output_gaussians.lidar_refine_loss = lidar_refine_loss
 
         return output_gaussians
 

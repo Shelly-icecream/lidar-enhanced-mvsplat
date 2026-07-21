@@ -338,7 +338,8 @@ class DepthPredictorMultiView(nn.Module):
         wo_cost_volume_refine=False,
         
         use_lidar_bias=False,
-        use_lidar_loss=False,
+        use_lidar_coarse_loss=False,
+        use_lidar_refine_loss=False,
         lidar_lambda_surface=10.0,
         lidar_lambda_free=2.0,
         lidar_sigma_disp=0.12,
@@ -358,7 +359,8 @@ class DepthPredictorMultiView(nn.Module):
         # Table 3: w/o U-Net
         self.wo_cost_volume_refine = wo_cost_volume_refine
         self.use_lidar_bias = use_lidar_bias
-        self.use_lidar_loss = use_lidar_loss
+        self.use_lidar_coarse_loss = use_lidar_coarse_loss
+        self.use_lidar_refine_loss = use_lidar_refine_loss
 
         self.lidar_lambda_surface = lidar_lambda_surface
         self.lidar_lambda_free = lidar_lambda_free
@@ -501,6 +503,7 @@ class DepthPredictorMultiView(nn.Module):
     ):
         """IMPORTANT: this model is in (v b), NOT (b v), due to some historical issues.
         keep this in mind when performing any operation related to the view dim"""
+        extra_info = {} if extra_info is None else extra_info
         
         # format the input
         b, v, c, h, w = features.shape
@@ -558,13 +561,18 @@ class DepthPredictorMultiView(nn.Module):
         pdf_vis = F.softmax(depth_logits_vis, dim=1)
         coarse_disps_vis = (disp_candi_curr * pdf_vis).sum(dim=1, keepdim=True)
 
-        lidar_loss_before = None
-        lidar_loss_after = None
+        lidar_coarse_loss = None
+        lidar_refine_loss = None
         lidar_mask_low = None
         lidar_disp_low = None
+        print_lidar_stats = bool(extra_info.get("print_lidar_stats", False))
         
         has_lidar = lidar_depth is not None and lidar_mask is not None
-        need_lidar = has_lidar and (self.use_lidar_bias or self.use_lidar_loss)
+        need_lidar = has_lidar and (
+            self.use_lidar_bias
+            or self.use_lidar_coarse_loss
+            or self.use_lidar_refine_loss
+        )
 
         if need_lidar:
             lidar_bias, lidar_mask_low,lidar_disp_low = build_lidar_visibility_prior(
@@ -587,10 +595,10 @@ class DepthPredictorMultiView(nn.Module):
             else:
                 depth_logits_lidar = depth_logits_vis
             # loss only uses pure visual prediction before LiDAR bias.
-            #if self.use_lidar_loss and mask.sum() > 0:
-            if mask.sum() > 0:
-                lidar_loss_before = (coarse_disps_vis - lidar_disp_low).abs()[mask].mean()
-                print("coarse disp loss before:", lidar_loss_before)
+            if self.use_lidar_coarse_loss and mask.sum() > 0:
+                lidar_coarse_loss = (coarse_disps_vis - lidar_disp_low).abs()[mask].mean()
+                if print_lidar_stats:
+                    print("lidar coarse loss (last batch):", lidar_coarse_loss)
             
         else:
             depth_logits_lidar = depth_logits_vis 
@@ -647,14 +655,6 @@ class DepthPredictorMultiView(nn.Module):
                         f"improve_ratio={improve_ratio_low.item():.4f}, "
                         f"worsen_ratio={worsen_ratio_low.item():.4f}"
                     )
-        if need_lidar and self.use_lidar_bias and lidar_mask_low is not None:
-            mask = lidar_mask_low.bool()
-            if mask.sum() > 0:
-                lidar_loss_after = (coarse_disps - lidar_disp_low).abs()[mask].mean()
-                print("coarse disp loss after:", lidar_loss_after)
-                if lidar_loss_before is not None:
-                    print("delta:", lidar_loss_after - lidar_loss_before)
-
         pdf_max = torch.max(pdf, dim=1, keepdim=True)[0]  # argmax
         pdf_max = F.interpolate(pdf_max, scale_factor=self.upscale_factor)
         fullres_disps = F.interpolate(
@@ -716,6 +716,36 @@ class DepthPredictorMultiView(nn.Module):
                 1.0 / rearrange(far, "b v -> (v b) () () ()"),
                 1.0 / rearrange(near, "b v -> (v b) () () ()"),
             )
+
+            if self.use_lidar_refine_loss and lidar_depth is not None and lidar_mask is not None:
+                lidar_depth_full = rearrange(
+                    lidar_depth,
+                    "b v c h w -> (v b) c h w",
+                ).to(
+                    device=fine_disps.device,
+                    dtype=fine_disps.dtype,
+                )
+
+                lidar_mask_full = rearrange(
+                    lidar_mask,
+                    "b v c h w -> (v b) c h w",
+                ).to(device=fine_disps.device)
+
+                valid = (
+                    (lidar_mask_full > 0.5)
+                    & torch.isfinite(lidar_depth_full)
+                    & (lidar_depth_full > 1e-6)
+                )
+
+                if valid.any():
+                    lidar_disp_full = 1.0 / lidar_depth_full.clamp(min=1e-6)
+                    final_disp_for_loss = fine_disps[:, :1]
+                    lidar_refine_loss = (
+                        final_disp_for_loss - lidar_disp_full
+                    ).abs()[valid].mean()
+                    if print_lidar_stats:
+                        print("lidar refine loss (last batch):", lidar_refine_loss)
+
             # ============================================================
             # LiDAR 三阶段误差诊断：
             # 1. 纯视觉 coarse depth
@@ -834,5 +864,5 @@ class DepthPredictorMultiView(nn.Module):
                 srf=1,
             )
 
-        return depths, densities, raw_gaussians,lidar_loss_before
+        return depths, densities, raw_gaussians, lidar_coarse_loss, lidar_refine_loss
     
