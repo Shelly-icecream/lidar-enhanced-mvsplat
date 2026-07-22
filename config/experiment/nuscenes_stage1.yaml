@@ -35,6 +35,7 @@ model:
     use_lidar_bias: false
     use_lidar_coarse_loss: false
     use_lidar_refine_loss: false
+    freeze_except_to_disparity: true
     lidar_loss_weight: 0.0
     lidar_final_loss_weight: 0.0
     lidar_lambda_surface: 10.0

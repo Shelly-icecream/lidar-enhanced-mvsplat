@@ -479,13 +479,13 @@ class DepthPredictorMultiView(nn.Module):
             ]
             self.to_disparity = nn.Sequential(*disps_models)
         print(
-    "[LiDAR Config] "
-    f"surface={self.lidar_lambda_surface}, "
-    f"free={self.lidar_lambda_free}, "
-    f"sigma_disp={self.lidar_sigma_disp}, "
-    f"free_margin={self.lidar_free_margin}, "
-    f"temperature={self.lidar_temperature}"
-)
+            "[LiDAR Config] "
+            f"surface={self.lidar_lambda_surface}, "
+            f"free={self.lidar_lambda_free}, "
+            f"sigma_disp={self.lidar_sigma_disp}, "
+            f"free_margin={self.lidar_free_margin}, "
+            f"temperature={self.lidar_temperature}"
+        )
 
     def forward(
         self,
@@ -712,9 +712,18 @@ class DepthPredictorMultiView(nn.Module):
                 srf=1,
             )
 
-            fine_disps = (fullres_disps + delta_disps).clamp(
-                1.0 / rearrange(far, "b v -> (v b) () () ()"),
-                1.0 / rearrange(near, "b v -> (v b) () () ()"),
+            raw_fine_disps = fullres_disps + delta_disps
+
+            disp_min = 1.0 / rearrange(
+                far, "b v -> (v b) () () ()"
+            )
+            disp_max = 1.0 / rearrange(
+                near, "b v -> (v b) () () ()"
+            )
+
+            fine_disps = raw_fine_disps.clamp(
+                min=disp_min,
+                max=disp_max,
             )
 
             if self.use_lidar_refine_loss and lidar_depth is not None and lidar_mask is not None:
@@ -736,6 +745,30 @@ class DepthPredictorMultiView(nn.Module):
                     & torch.isfinite(lidar_depth_full)
                     & (lidar_depth_full > 1e-6)
                 )
+
+                with torch.no_grad():
+                    raw_final_disp = raw_fine_disps[:, :1]
+
+                    saturated = (
+                        (raw_final_disp <= disp_min)
+                        | (raw_final_disp >= disp_max)
+                    )
+
+                    saturation_ratio = (
+                        saturated[valid].float().mean()
+                        if valid.any()
+                        else torch.tensor(0.0, device=raw_final_disp.device)
+                    )
+
+                    if valid.any():
+                        print(
+                            "[Refine diagnostics] "
+                            f"saturation_ratio={saturation_ratio.item():.6f}, "
+                            f"raw_min={raw_final_disp[valid].min().item():.6f}, "
+                            f"raw_max={raw_final_disp[valid].max().item():.6f}, "
+                            f"delta_abs_mean="
+                            f"{delta_disps[:, :1][valid].abs().mean().item():.6f}"
+                        )
 
                 if valid.any():
                     lidar_disp_full = 1.0 / lidar_depth_full.clamp(min=1e-6)

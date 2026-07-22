@@ -61,6 +61,7 @@ class EncoderCostVolumeCfg:
     use_lidar_bias: bool
     use_lidar_coarse_loss: bool
     use_lidar_refine_loss: bool
+    freeze_except_to_disparity: bool
     lidar_loss_weight: float
     lidar_final_loss_weight: float
     lidar_lambda_surface: float
@@ -142,6 +143,18 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             lidar_free_margin=cfg.lidar_free_margin,
             lidar_temperature=cfg.lidar_temperature,
         )
+
+        if cfg.freeze_except_to_disparity:
+            if not hasattr(self.depth_predictor, "to_disparity"):
+                raise ValueError(
+                    "freeze_except_to_disparity requires wo_depth_refine=false so to_disparity exists"
+                )
+
+            # Freeze the full encoder stack and keep only the disparity head trainable.
+            for param in self.parameters():
+                param.requires_grad = False
+            for param in self.depth_predictor.to_disparity.parameters():
+                param.requires_grad = True
 
     def map_pdf_to_opacity(
         self,
