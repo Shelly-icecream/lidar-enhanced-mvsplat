@@ -107,11 +107,6 @@ class ModelWrapper(LightningModule):
 
         # Set up the model.
         self.encoder = encoder
-    
-        if hasattr(self.encoder, "backbone"):
-            print("==> Freeze encoder.backbone for nuScenes visual-only fine-tuning")
-            for p in self.encoder.backbone.parameters():
-                p.requires_grad = False
         self.encoder_visualizer = encoder_visualizer
         self.decoder = decoder
         self.data_shim = get_data_shim(self.encoder)

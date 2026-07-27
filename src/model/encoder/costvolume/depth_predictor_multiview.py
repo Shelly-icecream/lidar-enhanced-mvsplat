@@ -769,10 +769,10 @@ class DepthPredictorMultiView(nn.Module):
                             f"delta_abs_mean="
                             f"{delta_disps[:, :1][valid].abs().mean().item():.6f}"
                         )
-
+ 
                 if valid.any():
                     lidar_disp_full = 1.0 / lidar_depth_full.clamp(min=1e-6)
-                    final_disp_for_loss = fine_disps[:, :1]
+                    final_disp_for_loss = raw_fine_disps[:, :1]
                     lidar_refine_loss = (
                         final_disp_for_loss - lidar_disp_full
                     ).abs()[valid].mean()
