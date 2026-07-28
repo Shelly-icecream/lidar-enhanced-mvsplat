@@ -47,6 +47,7 @@ class OptimizerCfg:
     lr: float
     warm_up_steps: int
     cosine_lr: bool
+    lidar_parameter_lr: float
 
 
 @dataclass
@@ -123,6 +124,34 @@ class ModelWrapper(LightningModule):
         if self.test_cfg.compute_scores:
             self.test_step_outputs = {}
             self.time_skip_steps_dict = {"encoder": 0, "decoder": 0}
+            
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        """During inference, match the optional LiDAR network to the checkpoint.
+
+        During training the YAML flag is authoritative, which allows a new
+        learnable network to be initialized while fine-tuning an older
+        checkpoint that does not contain its weights.
+        """
+        if get_cfg().mode == "train":
+            return
+        prefix = "encoder.depth_predictor.lidar_depth_parameter_net."
+        has_lidar_parameter_net = any(
+            key.startswith(prefix) for key in checkpoint["state_dict"]
+        )
+        depth_predictor = getattr(self.encoder, "depth_predictor", None)
+        
+        if depth_predictor is not None and hasattr(
+            depth_predictor, "set_lidar_depth_parameter_net_enabled"
+        ):
+            depth_predictor.set_lidar_depth_parameter_net_enabled(
+                has_lidar_parameter_net
+            )
+            state = "enabled" if has_lidar_parameter_net else "disabled"
+            print(                
+                "==> Learnable LiDAR bias parameters "
+                f"{state} based on inference checkpoint."
+            )
+
 
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
@@ -637,7 +666,7 @@ class ModelWrapper(LightningModule):
                 if id(parameter) not in lidar_parameter_ids
             ]
             lidar_parameters = list(lidar_parameter_net.parameters())
-            lidar_parameter_lr = self.optimizer_cfg.lr * 0.1
+            lidar_parameter_lr = self.optimizer_cfg.lidar_parameter_lr
             optimizer_parameters = [
                 {"params": base_parameters, "lr": self.optimizer_cfg.lr},
                 {"params": lidar_parameters, "lr": lidar_parameter_lr},

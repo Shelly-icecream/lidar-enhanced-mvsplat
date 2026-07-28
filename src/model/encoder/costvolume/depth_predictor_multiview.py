@@ -349,6 +349,21 @@ class DepthPredictorMultiView(nn.Module):
     """IMPORTANT: this model is in (v b), NOT (b v), due to some historical issues.
     keep this in mind when performing any operation related to the view dim"""
 
+    def set_lidar_depth_parameter_net_enabled(self, enabled: bool) -> None:
+        """Match the optional LiDAR-parameter network to a checkpoint."""
+        self.use_learnable_lidar_bias_params = enabled
+        if enabled and self.lidar_depth_parameter_net is None:
+            self.lidar_depth_parameter_net = nn.Sequential(
+                nn.Conv2d(1, 16, 1),
+                nn.SiLU(),
+                nn.Conv2d(16, 2, 1),
+            )
+            nn.init.zeros_(self.lidar_depth_parameter_net[-1].weight)
+            nn.init.zeros_(self.lidar_depth_parameter_net[-1].bias)
+        elif not enabled:
+            self.lidar_depth_parameter_net = None
+
+
     def __init__(
         self,
         feature_channels=128,
@@ -404,13 +419,7 @@ class DepthPredictorMultiView(nn.Module):
         self.lidar_lambda_delta_log_max = math.log(4.0)
         self.lidar_depth_parameter_net = None
         if self.use_learnable_lidar_bias_params:
-            self.lidar_depth_parameter_net = nn.Sequential(
-                nn.Conv2d(1, 16, 1),
-                nn.SiLU(),
-                nn.Conv2d(16, 2, 1),
-            )
-            nn.init.zeros_(self.lidar_depth_parameter_net[-1].weight)
-            nn.init.zeros_(self.lidar_depth_parameter_net[-1].bias)
+            self.set_lidar_depth_parameter_net_enabled(True)
         self.lidar_parameter_diagnostics = {}
         
         # 用于统计整个测试集上的 LiDAR 三阶段误差

@@ -33,6 +33,7 @@ trainer:
 model:
   encoder:
     use_lidar_bias: false
+    use_learnable_lidar_bias_params: false
     use_lidar_coarse_loss: false
     use_lidar_refine_loss: true
     frozen_params: [backbone]
