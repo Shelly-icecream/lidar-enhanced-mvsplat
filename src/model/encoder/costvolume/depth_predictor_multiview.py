@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -10,9 +11,11 @@ def build_lidar_visibility_prior(
     lidar_mask,
     disp_candi_curr,
     target_hw,
-    lambda_surface=1.0,
-    lambda_free=0.3,
-    sigma_disp=0.12,
+    depth_parameter_net=None,
+    lambda_surface=10.0,
+    lambda_free=2.0,
+    lambda_delta_log_max=math.log(4.0),
+    sigma_disp=0.32,
     free_margin=0.5,
     eps=1e-6,
 ):
@@ -116,7 +119,32 @@ def build_lidar_visibility_prior(
         1.0 / lidar_disp_low.clamp(min=eps),
         torch.zeros_like(lidar_disp_low),
     )
+    # Condition the two analytic-prior strengths on inverse depth. Normalizing
+    # against the current candidate range keeps the input stable across near/far
+    # settings. The predicted log offsets are bounded to a 1/4x--4x multiplier.
+    disp_min = disp_candi_curr.amin(dim=1, keepdim=True)
+    disp_max = disp_candi_curr.amax(dim=1, keepdim=True)
+    normalized_lidar_disp = (
+        (lidar_disp_low - disp_min)
+        / (disp_max - disp_min).clamp(min=eps)
+    ).clamp(0.0, 1.0)
 
+    if depth_parameter_net is None:
+        lambda_surface_map = torch.full_like(
+            lidar_disp_low, float(lambda_surface)
+        )
+        lambda_free_map = torch.full_like(
+            lidar_disp_low, float(lambda_free)
+        )
+    else:
+        delta_log_lambdas = (
+            torch.tanh(depth_parameter_net(normalized_lidar_disp))
+            * lambda_delta_log_max
+        )
+        delta_log_surface, delta_log_free = delta_log_lambdas.chunk(2, dim=1)
+        lambda_surface_map = float(lambda_surface) * delta_log_surface.exp()
+        lambda_free_map = float(lambda_free) * delta_log_free.exp()
+        
     # 可选：第一次调用时打印统计量
     if not getattr(
         build_lidar_visibility_prior,
@@ -189,14 +217,16 @@ def build_lidar_visibility_prior(
     )
 
     lidar_bias = (
-        lambda_surface * surface_prior
-        - lambda_free * free_prior
+        lambda_surface_map * surface_prior
+        - lambda_free_map * free_prior
     )
 
     return (
         lidar_bias,
         lidar_mask_low,
         lidar_disp_low,
+        lambda_surface_map,
+        lambda_free_map,
     )
 
 def warp_with_pose_depth_candidates(
@@ -340,6 +370,7 @@ class DepthPredictorMultiView(nn.Module):
         use_lidar_bias=False,
         use_lidar_coarse_loss=False,
         use_lidar_refine_loss=False,
+        use_learnable_lidar_bias_params=False,
         lidar_lambda_surface=10.0,
         lidar_lambda_free=2.0,
         lidar_sigma_disp=0.12,
@@ -361,12 +392,26 @@ class DepthPredictorMultiView(nn.Module):
         self.use_lidar_bias = use_lidar_bias
         self.use_lidar_coarse_loss = use_lidar_coarse_loss
         self.use_lidar_refine_loss = use_lidar_refine_loss
+        self.use_learnable_lidar_bias_params = (
+            use_learnable_lidar_bias_params
+        )
 
         self.lidar_lambda_surface = lidar_lambda_surface
         self.lidar_lambda_free = lidar_lambda_free
         self.lidar_sigma_disp = lidar_sigma_disp
         self.lidar_free_margin = lidar_free_margin
         self.lidar_temperature = lidar_temperature
+        self.lidar_lambda_delta_log_max = math.log(4.0)
+        self.lidar_depth_parameter_net = None
+        if self.use_learnable_lidar_bias_params:
+            self.lidar_depth_parameter_net = nn.Sequential(
+                nn.Conv2d(1, 16, 1),
+                nn.SiLU(),
+                nn.Conv2d(16, 2, 1),
+            )
+            nn.init.zeros_(self.lidar_depth_parameter_net[-1].weight)
+            nn.init.zeros_(self.lidar_depth_parameter_net[-1].bias)
+        self.lidar_parameter_diagnostics = {}
         
         # 用于统计整个测试集上的 LiDAR 三阶段误差
         self.lidar_diag = {
@@ -570,13 +615,21 @@ class DepthPredictorMultiView(nn.Module):
         )
 
         if need_lidar:
-            lidar_bias, lidar_mask_low,lidar_disp_low = build_lidar_visibility_prior(
+            (
+                lidar_bias,
+                lidar_mask_low,
+                lidar_disp_low,
+                lambda_surface_map,
+                lambda_free_map,
+            ) = build_lidar_visibility_prior(
                 lidar_depth=lidar_depth,              # [B,V,1,H,W]
                 lidar_mask=lidar_mask,                # [B,V,1,H,W]
                 disp_candi_curr=disp_candi_curr,      # [v*b,D,1,1]
                 target_hw=depth_logits_vis.shape[-2:],    # (h,w)
+                depth_parameter_net=self.lidar_depth_parameter_net,
                 lambda_surface=self.lidar_lambda_surface,
                 lambda_free=self.lidar_lambda_free,
+                lambda_delta_log_max=self.lidar_lambda_delta_log_max,
                 sigma_disp=self.lidar_sigma_disp,
                 free_margin=self.lidar_free_margin,
             )
@@ -619,6 +672,35 @@ class DepthPredictorMultiView(nn.Module):
                 valid_low = lidar_mask_low > 0.5
 
                 if valid_low.any():
+                    valid_parameter_cells = valid_low[:, :1]
+                    surface_values = lambda_surface_map[valid_parameter_cells]
+                    free_values = lambda_free_map[valid_parameter_cells]
+                    bias_std_d = lidar_bias.std(dim=1, unbiased=False)
+                    visual_logits_std_d = depth_logits_vis.std(
+                        dim=1, unbiased=False
+                    )
+                    valid_2d = valid_low[:, 0]
+                    mean_bias_std = bias_std_d[valid_2d].mean()
+                    mean_visual_logits_std = visual_logits_std_d[
+                        valid_2d
+                    ].mean()
+                    bias_to_visual_std_ratio = (
+                        mean_bias_std
+                        / mean_visual_logits_std.clamp(min=1e-6)
+                    )
+                    self.lidar_parameter_diagnostics = {
+                        "lambda_surface_mean": surface_values.mean().detach(),
+                        "lambda_surface_min": surface_values.min().detach(),
+                        "lambda_surface_max": surface_values.max().detach(),
+                        "lambda_free_mean": free_values.mean().detach(),
+                        "lambda_free_min": free_values.min().detach(),
+                        "lambda_free_max": free_values.max().detach(),
+                        "bias_std_d": mean_bias_std.detach(),
+                        "visual_logits_std_d": mean_visual_logits_std.detach(),
+                        "bias_to_visual_std_ratio": (
+                            bias_to_visual_std_ratio.detach()
+                        ),
+                    }
                     # 纯视觉 coarse disparity 与 LiDAR 的误差
                     err_vis_low = (
                         coarse_disps_vis - lidar_disp_low
@@ -647,7 +729,19 @@ class DepthPredictorMultiView(nn.Module):
                         f"E_bias={err_bias_low.mean().item():.8f}, "
                         f"gain={gain:.8f}, "
                         f"improve_ratio={improve_ratio_low.item():.4f}, "
-                        f"worsen_ratio={worsen_ratio_low.item():.4f}"
+                        f"worsen_ratio={worsen_ratio_low.item():.4f}",
+                        f"lambda_surface="
+                        f"{surface_values.mean().item():.4f}"
+                        f"[{surface_values.min().item():.4f},"
+                        f"{surface_values.max().item():.4f}], "
+                        f"lambda_free={free_values.mean().item():.4f}"
+                        f"[{free_values.min().item():.4f},"
+                        f"{free_values.max().item():.4f}], "
+                        f"bias_std_d={mean_bias_std.item():.6f}, "
+                        f"visual_logits_std_d="
+                        f"{mean_visual_logits_std.item():.6f}, "
+                        f"bias_visual_std_ratio="
+                        f"{bias_to_visual_std_ratio.item():.6f}"
                     )
         pdf_max = torch.max(pdf, dim=1, keepdim=True)[0]  # argmax
         pdf_max = F.interpolate(pdf_max, scale_factor=self.upscale_factor)

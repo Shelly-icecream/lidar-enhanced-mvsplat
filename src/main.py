@@ -135,7 +135,7 @@ def train(cfg_dict: DictConfig):
         # Just load model weights, without optimizer states
         # e.g., fine-tune from the released weights on other datasets
         model_wrapper = ModelWrapper.load_from_checkpoint(
-            checkpoint_path, **model_kwargs, strict=True)
+            checkpoint_path, **model_kwargs, strict=False)
         print(cyan(f"Loaded weigths from {checkpoint_path}."))
     else:
         model_wrapper = ModelWrapper(**model_kwargs)

@@ -48,6 +48,7 @@ use_lidar_refine_loss: false
 frozen_params: []
 lidar_loss_weight: 0.01
 lidar_final_loss_weight: 0.01
+use_learnable_lidar_bias_params: false
 
 # LiDAR visibility prior params
 lidar_lambda_surface: 10.0

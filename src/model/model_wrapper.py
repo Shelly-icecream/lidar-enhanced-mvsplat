@@ -137,6 +137,13 @@ class ModelWrapper(LightningModule):
             scene_names=batch["scene"],
         )
         lidar_coarse_loss = getattr(gaussians, "lidar_coarse_loss", None)
+        lidar_parameter_diagnostics = getattr(
+            getattr(self.encoder, "depth_predictor", None),
+            "lidar_parameter_diagnostics",
+            {},
+        )
+        for name, value in lidar_parameter_diagnostics.items():
+            self.log(f"lidar_bias/{name}", value)
         lidar_refine_loss = getattr(gaussians, "lidar_refine_loss", None)
         output = self.decoder.forward(
             gaussians,
@@ -576,6 +583,7 @@ class ModelWrapper(LightningModule):
         #     vcat(rgb, depth)
         #     for rgb, depth in zip(output_det.color[0], depth_map(output_det.depth[0]))
         # ]
+        
         images = [
             add_border(
                 hcat(
@@ -609,10 +617,43 @@ class ModelWrapper(LightningModule):
                 )
 
     def configure_optimizers(self):
-        optimizer = optim.Adam(self.parameters(), lr=self.optimizer_cfg.lr)
+        # 多学习率分组优化
+        lidar_parameter_net = getattr(
+            getattr(self.encoder, "depth_predictor", None),
+            "lidar_depth_parameter_net",
+            None,
+        )
+        if lidar_parameter_net is None:
+            optimizer_parameters = self.parameters()
+            scheduler_max_lr = self.optimizer_cfg.lr
+        else:
+            lidar_parameter_ids = {
+                id(parameter)
+                for parameter in lidar_parameter_net.parameters()
+            }
+            base_parameters = [
+                parameter
+                for parameter in self.parameters()
+                if id(parameter) not in lidar_parameter_ids
+            ]
+            lidar_parameters = list(lidar_parameter_net.parameters())
+            lidar_parameter_lr = self.optimizer_cfg.lr * 0.1
+            optimizer_parameters = [
+                {"params": base_parameters, "lr": self.optimizer_cfg.lr},
+                {"params": lidar_parameters, "lr": lidar_parameter_lr},
+            ]
+            scheduler_max_lr = [
+                self.optimizer_cfg.lr,
+                lidar_parameter_lr,
+            ]
+
+        optimizer = optim.Adam(
+            optimizer_parameters,
+            lr=self.optimizer_cfg.lr,
+        )
         if self.optimizer_cfg.cosine_lr:
             warm_up = torch.optim.lr_scheduler.OneCycleLR(
-                            optimizer, self.optimizer_cfg.lr,
+                            optimizer, scheduler_max_lr,
                             self.trainer.max_steps + 10,
                             pct_start=0.01,
                             cycle_momentum=False,
