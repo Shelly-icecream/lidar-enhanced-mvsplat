@@ -174,7 +174,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         deterministic: bool = False,
         visualization_dump: Optional[dict] = None,
         scene_names: Optional[list] = None,
-        print_lidar_stats: bool = False,
+        
     ) -> Gaussians:
         device = context["image"].device
         b, v, _, h, w = context["image"].shape
@@ -203,7 +203,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         extra_info = {}
         extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
         extra_info["scene_names"] = scene_names
-        extra_info["print_lidar_stats"] = print_lidar_stats
         gpp = self.cfg.gaussians_per_pixel
         depths, densities, raw_gaussians, lidar_coarse_loss, lidar_refine_loss = self.depth_predictor(
             in_feats,

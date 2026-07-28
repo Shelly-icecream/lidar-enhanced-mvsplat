@@ -367,16 +367,20 @@ class DepthPredictorMultiView(nn.Module):
         self.lidar_sigma_disp = lidar_sigma_disp
         self.lidar_free_margin = lidar_free_margin
         self.lidar_temperature = lidar_temperature
+        
         # 用于统计整个测试集上的 LiDAR 三阶段误差
         self.lidar_diag = {
-    "num_points": 0,
-    "vis_error_sum": 0.0,
-    "bias_error_sum": 0.0,
-    "final_error_sum": 0.0,
-    "refine_delta_sum": 0.0,
-    "refine_improve_count": 0,
-    "refine_worsen_count": 0,
-}
+            "num_points": 0,
+            "vis_error_sum": 0.0,
+            "bias_error_sum": 0.0,
+            "refine_delta_sum": 0.0,
+            "refine_improve_count": 0,
+            "refine_worsen_count": 0,
+            "final_depth_num_points": 0,
+            "final_depth_abs_error_sum": 0.0,
+            "final_depth_abs_rel_sum": 0.0,
+            "final_depth_sq_error_sum": 0.0,
+        }
 
         # Cost volume refinement: 2D U-Net
         input_channels = feature_channels if wo_cost_volume else (num_depth_candidates + feature_channels)
@@ -478,14 +482,6 @@ class DepthPredictorMultiView(nn.Module):
                 nn.Conv2d(channels * 2, gaussians_per_pixel * 2, 3, 1, 1),
             ]
             self.to_disparity = nn.Sequential(*disps_models)
-        print(
-            "[LiDAR Config] "
-            f"surface={self.lidar_lambda_surface}, "
-            f"free={self.lidar_lambda_free}, "
-            f"sigma_disp={self.lidar_sigma_disp}, "
-            f"free_margin={self.lidar_free_margin}, "
-            f"temperature={self.lidar_temperature}"
-        )
 
     def forward(
         self,
@@ -565,7 +561,6 @@ class DepthPredictorMultiView(nn.Module):
         lidar_refine_loss = None
         lidar_mask_low = None
         lidar_disp_low = None
-        print_lidar_stats = bool(extra_info.get("print_lidar_stats", False))
         
         has_lidar = lidar_depth is not None and lidar_mask is not None
         need_lidar = has_lidar and (
@@ -597,8 +592,7 @@ class DepthPredictorMultiView(nn.Module):
             # loss only uses pure visual prediction before LiDAR bias.
             if self.use_lidar_coarse_loss and mask.sum() > 0:
                 lidar_coarse_loss = (coarse_disps_vis - lidar_disp_low).abs()[mask].mean()
-                if print_lidar_stats:
-                    print("lidar coarse loss (last batch):", lidar_coarse_loss)
+                
             
         else:
             depth_logits_lidar = depth_logits_vis 
@@ -776,8 +770,50 @@ class DepthPredictorMultiView(nn.Module):
                     lidar_refine_loss = (
                         final_disp_for_loss - lidar_disp_full
                     ).abs()[valid].mean()
-                    if print_lidar_stats:
-                        print("lidar refine loss (last batch):", lidar_refine_loss)
+                    
+
+            # Accumulate full-resolution final-depth metrics over valid LiDAR pixels.
+            # These are evaluation diagnostics and do not participate in backpropagation.
+            if has_lidar and not self.training:
+                with torch.no_grad():
+                    lidar_depth_full = rearrange(
+                        lidar_depth,
+                        "b v c h w -> (v b) c h w",
+                    ).to(
+                        device=fine_disps.device,
+                        dtype=fine_disps.dtype,
+                    )
+                    lidar_mask_full = rearrange(
+                        lidar_mask,
+                        "b v c h w -> (v b) c h w",
+                    ).to(device=fine_disps.device)
+
+                    final_depth = 1.0 / fine_disps[:, :1].clamp(min=1e-6)
+                    valid_depth = (
+                        (lidar_mask_full > 0.5)
+                        & torch.isfinite(lidar_depth_full)
+                        & (lidar_depth_full > 1e-6)
+                        & torch.isfinite(final_depth)
+                        & (final_depth > 0)
+                    )
+
+                    if valid_depth.any():
+                        target_depth = lidar_depth_full[valid_depth]
+                        predicted_depth = final_depth[valid_depth]
+                        abs_error = (predicted_depth - target_depth).abs()
+
+                        self.lidar_diag["final_depth_num_points"] += int(
+                            valid_depth.sum().item()
+                        )
+                        self.lidar_diag["final_depth_abs_error_sum"] += (
+                            abs_error.sum().item()
+                        )
+                        self.lidar_diag["final_depth_abs_rel_sum"] += (
+                            (abs_error / target_depth).sum().item()
+                        )
+                        self.lidar_diag["final_depth_sq_error_sum"] += (
+                            (predicted_depth - target_depth).square().sum().item()
+                        )
 
             # ============================================================
             # LiDAR 三阶段误差诊断：
@@ -869,10 +905,6 @@ class DepthPredictorMultiView(nn.Module):
 
                         self.lidar_diag["bias_error_sum"] += (
                             bias_error.sum().item()
-                        )
-
-                        self.lidar_diag["final_error_sum"] += (
-                            final_error.sum().item()
                         )
 
                         self.lidar_diag["refine_delta_sum"] += (

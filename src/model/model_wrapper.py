@@ -127,7 +127,7 @@ class ModelWrapper(LightningModule):
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         _, _, _, h, w = batch["target"]["image"].shape
-        print_lidar_stats = batch_idx == self.trainer.num_training_batches - 1
+        
 
         # Run the model.
         gaussians = self.encoder(
@@ -135,7 +135,6 @@ class ModelWrapper(LightningModule):
             self.global_step,
             False,
             scene_names=batch["scene"],
-            print_lidar_stats=print_lidar_stats,
         )
         lidar_coarse_loss = getattr(gaussians, "lidar_coarse_loss", None)
         lidar_refine_loss = getattr(gaussians, "lidar_refine_loss", None)
@@ -315,6 +314,36 @@ class ModelWrapper(LightningModule):
             "lidar_diag",
             None,
         )
+        if diag is not None and diag["final_depth_num_points"] > 0:
+            num_points = diag["final_depth_num_points"]
+            lidar_depth_metrics = {
+                "num_points": num_points,
+                "mae": diag["final_depth_abs_error_sum"] / num_points,
+                "abs_rel": diag["final_depth_abs_rel_sum"] / num_points,
+                "rmse": (
+                    diag["final_depth_sq_error_sum"] / num_points
+                ) ** 0.5,
+            }
+
+            print(
+                "[Final depth LiDAR metrics] "
+                f"points={lidar_depth_metrics['num_points']}, "
+                f"MAE={lidar_depth_metrics['mae']:.6f} m, "
+                f"AbsRel={lidar_depth_metrics['abs_rel']:.6f}, "
+                f"RMSE={lidar_depth_metrics['rmse']:.6f} m"
+            )
+            
+            out_dir.mkdir(parents=True, exist_ok=True)
+            with (out_dir / "final_depth_lidar_metrics.json").open("w") as f:
+                json.dump(lidar_depth_metrics, f, indent=2)
+
+            for key in (
+                "final_depth_num_points",
+                "final_depth_abs_error_sum",
+                "final_depth_abs_rel_sum",
+                "final_depth_sq_error_sum",
+            ):
+                diag[key] = 0 if key == "final_depth_num_points" else 0.0
    
 
     @rank_zero_only
