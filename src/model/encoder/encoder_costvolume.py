@@ -62,6 +62,7 @@ class EncoderCostVolumeCfg:
     use_lidar_coarse_loss: bool
     use_lidar_refine_loss: bool
     use_learnable_lidar_bias_params: bool
+    use_adaptive_lidar_fusion: bool
     frozen_params: list[str]
     lidar_loss_weight: float
     lidar_final_loss_weight: float
@@ -141,6 +142,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             use_learnable_lidar_bias_params=(
                 cfg.use_learnable_lidar_bias_params
             ),
+            use_adaptive_lidar_fusion=cfg.use_adaptive_lidar_fusion,
             lidar_lambda_surface=cfg.lidar_lambda_surface,
             lidar_lambda_free=cfg.lidar_lambda_free,
             lidar_sigma_disp=cfg.lidar_sigma_disp,

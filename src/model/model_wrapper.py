@@ -47,7 +47,7 @@ class OptimizerCfg:
     lr: float
     warm_up_steps: int
     cosine_lr: bool
-    lidar_parameter_lr: float
+
 
 
 @dataclass
@@ -134,24 +134,37 @@ class ModelWrapper(LightningModule):
         """
         if get_cfg().mode == "train":
             return
-        prefix = "encoder.depth_predictor.lidar_depth_parameter_net."
-        has_lidar_parameter_net = any(
-            key.startswith(prefix) for key in checkpoint["state_dict"]
+        legacy_prefix = "encoder.depth_predictor.lidar_depth_parameter_net."
+        adaptive_prefix = "encoder.depth_predictor.adaptive_lidar_fusion."
+        has_legacy_net = any(
+            key.startswith(legacy_prefix) for key in checkpoint["state_dict"]
+        )
+        has_adaptive_fusion = any(
+            key.startswith(adaptive_prefix) for key in checkpoint["state_dict"]
         )
         depth_predictor = getattr(self.encoder, "depth_predictor", None)
         
-        if depth_predictor is not None and hasattr(
-            depth_predictor, "set_lidar_depth_parameter_net_enabled"
-        ):
+        if depth_predictor is None:
+            return
+        if hasattr(depth_predictor, "set_lidar_depth_parameter_net_enabled"):
             depth_predictor.set_lidar_depth_parameter_net_enabled(
-                has_lidar_parameter_net
-            )
-            state = "enabled" if has_lidar_parameter_net else "disabled"
-            print(                
-                "==> Learnable LiDAR bias parameters "
-                f"{state} based on inference checkpoint."
+                has_legacy_net
             )
 
+        if hasattr(depth_predictor, "set_adaptive_lidar_fusion_enabled"):
+            depth_predictor.set_adaptive_lidar_fusion_enabled(
+                has_adaptive_fusion
+            )
+        if has_adaptive_fusion:
+            architecture = "adaptive two-branch fusion"
+        elif has_legacy_net:
+            architecture = "legacy depth-conditioned parameters"
+        else:
+            architecture = "fixed analytic prior"
+        print(
+            "==> Inference LiDAR architecture selected from checkpoint: "
+            f"{architecture}."
+        )
 
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
@@ -646,43 +659,10 @@ class ModelWrapper(LightningModule):
                 )
 
     def configure_optimizers(self):
-        # 多学习率分组优化
-        lidar_parameter_net = getattr(
-            getattr(self.encoder, "depth_predictor", None),
-            "lidar_depth_parameter_net",
-            None,
-        )
-        if lidar_parameter_net is None:
-            optimizer_parameters = self.parameters()
-            scheduler_max_lr = self.optimizer_cfg.lr
-        else:
-            lidar_parameter_ids = {
-                id(parameter)
-                for parameter in lidar_parameter_net.parameters()
-            }
-            base_parameters = [
-                parameter
-                for parameter in self.parameters()
-                if id(parameter) not in lidar_parameter_ids
-            ]
-            lidar_parameters = list(lidar_parameter_net.parameters())
-            lidar_parameter_lr = self.optimizer_cfg.lidar_parameter_lr
-            optimizer_parameters = [
-                {"params": base_parameters, "lr": self.optimizer_cfg.lr},
-                {"params": lidar_parameters, "lr": lidar_parameter_lr},
-            ]
-            scheduler_max_lr = [
-                self.optimizer_cfg.lr,
-                lidar_parameter_lr,
-            ]
-
-        optimizer = optim.Adam(
-            optimizer_parameters,
-            lr=self.optimizer_cfg.lr,
-        )
+        optimizer = optim.Adam(self.parameters(), lr=self.optimizer_cfg.lr)
         if self.optimizer_cfg.cosine_lr:
             warm_up = torch.optim.lr_scheduler.OneCycleLR(
-                            optimizer, scheduler_max_lr,
+                            optimizer, self.optimizer_cfg.lr,
                             self.trainer.max_steps + 10,
                             pct_start=0.01,
                             cycle_momentum=False,
