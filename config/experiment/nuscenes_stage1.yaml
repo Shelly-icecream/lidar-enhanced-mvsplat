@@ -24,7 +24,7 @@ data_loader:
     persistent_workers: false   
 
 trainer:
-  max_steps: 6000
+  max_steps: 2000
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 0.5        
@@ -33,12 +33,15 @@ trainer:
 model:
   encoder:
     use_lidar_bias: false
+    use_lidar_refine_mask: false
     use_learnable_lidar_bias_params: false
+    use_lidar_cross_attention: false
+    use_adaptive_lidar_fusion: false
     use_lidar_coarse_loss: false
     use_lidar_refine_loss: true
     frozen_params: [backbone]
     lidar_loss_weight: 0.0
-    lidar_final_loss_weight: 0.01
+    lidar_final_loss_weight: 0.05
     lidar_lambda_surface: 10.0
     lidar_lambda_free: 2.0
     lidar_sigma_disp: 0.32
@@ -100,7 +103,7 @@ test:
   save_video: false
 
 checkpointing:
-  load: checkpoints/re10k.ckpt   
+  load: checkpoints/epoch_12-step_2000.ckpt   
   resume: false                           
   every_n_train_steps: 200              
   save_top_k: -1                          

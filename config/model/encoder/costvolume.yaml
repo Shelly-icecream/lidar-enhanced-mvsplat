@@ -43,6 +43,7 @@ use_epipolar_trans: false      # Table B: w/ Epipolar Transformer
 
 # LiDAR guidance
 use_lidar_bias: false
+use_lidar_refine_mask: false
 use_lidar_coarse_loss: false
 use_lidar_refine_loss: false
 frozen_params: []
@@ -50,6 +51,11 @@ lidar_loss_weight: 0.01
 lidar_final_loss_weight: 0.01
 use_learnable_lidar_bias_params: false
 use_adaptive_lidar_fusion: false
+use_lidar_cross_attention: false
+lidar_cross_attention_dim: 128
+lidar_cross_attention_heads: 4
+# Inference-only checkpoint override: auto | on | off.
+lidar_cross_attention_inference_mode: auto
 
 # LiDAR visibility prior params
 lidar_lambda_surface: 10.0

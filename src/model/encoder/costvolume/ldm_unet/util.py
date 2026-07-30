@@ -110,7 +110,14 @@ def checkpoint(func, inputs, params, flag):
     :param flag: if False, disable gradient checkpointing.
     """
     if flag:
-        args = tuple(inputs) + tuple(params)
+        # Frozen modules may still sit between trainable modules and therefore
+        # participate in a checkpointed forward pass.  autograd.grad rejects
+        # tensors with requires_grad=False even when allow_unused=True, so only
+        # register parameters that are actually trainable.
+        trainable_params = tuple(
+            parameter for parameter in params if parameter.requires_grad
+        )
+        args = tuple(inputs) + trainable_params
         return CheckpointFunction.apply(func, len(inputs), *args)
     else:
         return func(*inputs)

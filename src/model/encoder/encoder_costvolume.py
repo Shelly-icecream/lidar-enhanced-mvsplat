@@ -59,10 +59,15 @@ class EncoderCostVolumeCfg:
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
     use_lidar_bias: bool
+    use_lidar_refine_mask: bool
     use_lidar_coarse_loss: bool
     use_lidar_refine_loss: bool
     use_learnable_lidar_bias_params: bool
     use_adaptive_lidar_fusion: bool
+    use_lidar_cross_attention: bool
+    lidar_cross_attention_dim: int
+    lidar_cross_attention_heads: int
+    lidar_cross_attention_inference_mode: str
     frozen_params: list[str]
     lidar_loss_weight: float
     lidar_final_loss_weight: float
@@ -80,7 +85,15 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
 
     def __init__(self, cfg: EncoderCostVolumeCfg) -> None:
         super().__init__(cfg)
-
+        if (
+            get_cfg().mode == "train"
+            and cfg.use_lidar_refine_mask
+            and not cfg.use_lidar_bias
+        ):
+            raise ValueError(
+                "use_lidar_refine_mask=true requires use_lidar_bias=true "
+                "during training."
+            )
         # multi-view Transformer backbone
         if cfg.use_epipolar_trans:
             self.epipolar_sampler = EpipolarSampler(
@@ -137,12 +150,19 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
             
             use_lidar_bias=cfg.use_lidar_bias,
+            use_lidar_refine_mask=cfg.use_lidar_refine_mask,
             use_lidar_coarse_loss=cfg.use_lidar_coarse_loss,
             use_lidar_refine_loss=cfg.use_lidar_refine_loss,
             use_learnable_lidar_bias_params=(
                 cfg.use_learnable_lidar_bias_params
             ),
             use_adaptive_lidar_fusion=cfg.use_adaptive_lidar_fusion,
+            use_lidar_cross_attention=cfg.use_lidar_cross_attention,
+            lidar_cross_attention_dim=cfg.lidar_cross_attention_dim,
+            lidar_cross_attention_heads=cfg.lidar_cross_attention_heads,
+            lidar_cross_attention_inference_mode=(
+                cfg.lidar_cross_attention_inference_mode
+            ),
             lidar_lambda_surface=cfg.lidar_lambda_surface,
             lidar_lambda_free=cfg.lidar_lambda_free,
             lidar_sigma_disp=cfg.lidar_sigma_disp,
@@ -151,11 +171,20 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         )
 
         for frozen_prefix in cfg.frozen_params:
+            matched_parameters = []
             for name, param in self.named_parameters():
-                if name == frozen_prefix:
-                    param.requires_grad = False
-            print(f"==> Freeze encoder parameters: {frozen_prefix}")
-
+                if name == frozen_prefix or name.startswith(f"{frozen_prefix}."):
+                    param.requires_grad_(False)
+                    matched_parameters.append(name)
+            if not matched_parameters:
+                raise ValueError(
+                    "No encoder parameters matched frozen prefix "
+                    f"{frozen_prefix!r}."
+                )
+            print(
+                "==> Freeze encoder parameters: "
+                f"{frozen_prefix} ({len(matched_parameters)} tensors)"
+            )
            
 
     def map_pdf_to_opacity(
