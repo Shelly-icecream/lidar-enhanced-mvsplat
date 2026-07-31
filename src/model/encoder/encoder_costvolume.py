@@ -185,7 +185,18 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 "==> Freeze encoder parameters: "
                 f"{frozen_prefix} ({len(matched_parameters)} tensors)"
             )
-           
+        # Let the final cost-volume projection adapt to features modified by
+        # LiDAR cross-attention, even when its parent module was frozen above.
+        corr_refine_last_parameters = list(
+            self.depth_predictor.corr_refine_net[-1].parameters()
+        )
+        for param in corr_refine_last_parameters:
+            param.requires_grad_(True)
+        print(
+            "==> Unfreeze encoder parameters: "
+            "depth_predictor.corr_refine_net[-1] "
+            f"({len(corr_refine_last_parameters)} tensors)"
+        )
 
     def map_pdf_to_opacity(
         self,

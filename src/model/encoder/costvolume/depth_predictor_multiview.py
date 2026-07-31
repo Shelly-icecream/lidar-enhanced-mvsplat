@@ -1219,6 +1219,19 @@ class DepthPredictorMultiView(nn.Module):
                 if self.use_lidar_cross_attention:
                     # Reuse the analytic bias's LiDAR surface response as the
                     # target, but supervise logits before any bias is applied.
+                    candidate_disp_min = disp_candi_curr.amin(
+                        dim=1,
+                        keepdim=True,
+                    )
+                    candidate_disp_max = disp_candi_curr.amax(
+                        dim=1,
+                        keepdim=True,
+                    )
+                    candidate_mask = (
+                        mask
+                        & (lidar_disp_low >= candidate_disp_min)
+                        & (lidar_disp_low <= candidate_disp_max)
+                    )
                     lidar_candidate_target = (
                         lidar_surface_prior
                         / lidar_surface_prior.sum(
@@ -1236,10 +1249,16 @@ class DepthPredictorMultiView(nn.Module):
                         reduction="none",
                     ).sum(dim=1, keepdim=True)
                     lidar_disparity_loss = error_after[mask].mean()
-                    lidar_candidate_loss = candidate_kl_map[mask].mean()
+                    if candidate_mask.any():
+                        lidar_candidate_loss = candidate_kl_map[
+                            candidate_mask
+                        ].mean()
+                    else:
+                        lidar_candidate_loss = candidate_kl_map.new_zeros(())
                     lidar_coarse_loss = (
                         lidar_disparity_loss
-                        + 0.1 * lidar_candidate_loss
+                        +
+                        1.0 * lidar_candidate_loss
                     )
                 else:
                     # Preserve the legacy expected-disparity loss when
@@ -1499,8 +1518,6 @@ class DepthPredictorMultiView(nn.Module):
                 srf=1,
             )
 
-            
-
             disp_min = 1.0 / rearrange(
                 far, "b v -> (v b) () () ()"
             )
@@ -1514,7 +1531,10 @@ class DepthPredictorMultiView(nn.Module):
                 max=disp_max,
             )
 
-            if self.use_lidar_refine_loss and lidar_depth is not None and lidar_mask is not None:
+            # Always report refinement health when LiDAR supervision is
+            # available.  Keep the loss itself gated below so diagnostics do
+            # not change the training objective.
+            if lidar_depth is not None and lidar_mask is not None:
                 lidar_depth_full = rearrange(
                     lidar_depth,
                     "b v c h w -> (v b) c h w",
@@ -1534,35 +1554,56 @@ class DepthPredictorMultiView(nn.Module):
                     & (lidar_depth_full > 1e-6)
                 )
 
-                with torch.no_grad():
-                    raw_final_disp = raw_fine_disps[:, :1]
+                if valid.any():
+                    with torch.no_grad():
+                        raw_final_disp = raw_fine_disps[:, :1]
+                        final_disp = fine_disps[:, :1]
+                        coarse_disp = fullres_disps[:, :1]
+                        delta_disp = delta_disps[:, :1]
+                        final_depth = 1.0 / final_disp.clamp_min(1e-6)
 
-                    lower_saturation_ratio = (
-                        (raw_final_disp <= disp_min)[valid].float().mean()
-                        if valid.any()
-                        else torch.tensor(0.0, device=raw_final_disp.device)
-                    )
+                        lower_saturation_ratio = (
+                            (raw_final_disp <= disp_min)[valid]
+                            .float()
+                            .mean()
+                        )
+                        upper_saturation_ratio = (
+                            (raw_final_disp >= disp_max)[valid]
+                            .float()
+                            .mean()
+                        )
 
-                    upper_saturation_ratio = (
-                        (raw_final_disp >= disp_max)[valid].float().mean()
-                        if valid.any()
-                        else torch.tensor(0.0, device=raw_final_disp.device)
-                    )
-
-                    if valid.any():
                         print(
                             "[Refine diagnostics] "
                             f"lower_saturation_ratio="
                             f"{lower_saturation_ratio.item():.6f}, "
                             f"upper_saturation_ratio="
                             f"{upper_saturation_ratio.item():.6f}, "
-                            f"raw_min={raw_final_disp[valid].min().item():.6f}, "
-                            f"raw_max={raw_final_disp[valid].max().item():.6f}, "
+                            f"coarse_mean="
+                            f"{coarse_disp[valid].mean().item():.6f}, "
+                            f"delta_mean="
+                            f"{delta_disp[valid].mean().item():.6f}, "
                             f"delta_abs_mean="
-                            f"{delta_disps[:, :1][valid].abs().mean().item():.6f}"
+                            f"{delta_disp[valid].abs().mean().item():.6f}, "
+                            f"delta_min="
+                            f"{delta_disp[valid].min().item():.6f}, "
+                            f"delta_max="
+                            f"{delta_disp[valid].max().item():.6f}, "
+                            f"raw_min="
+                            f"{raw_final_disp[valid].min().item():.6f}, "
+                            f"raw_mean="
+                            f"{raw_final_disp[valid].mean().item():.6f}, "
+                            f"raw_max="
+                            f"{raw_final_disp[valid].max().item():.6f}, "
+                            f"final_depth_min="
+                            f"{final_depth[valid].min().item():.6f}, "
+                            f"final_depth_mean="
+                            f"{final_depth[valid].mean().item():.6f}, "
+                            f"final_depth_max="
+                            f"{final_depth[valid].max().item():.6f}"
                         )
  
-                if valid.any():
+                if self.use_lidar_refine_loss and valid.any():
                     lidar_disp_full = 1.0 / lidar_depth_full.clamp(min=1e-6)
                     final_disp_for_loss = raw_fine_disps[:, :1]
                     lidar_data_loss = (
