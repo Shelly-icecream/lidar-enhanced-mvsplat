@@ -33,7 +33,6 @@ trainer:
 model:
   encoder:
     use_lidar_bias: false
-    use_lidar_refine_mask: false
     use_learnable_lidar_bias_params: false
     use_lidar_cross_attention: false
     use_adaptive_lidar_fusion: false

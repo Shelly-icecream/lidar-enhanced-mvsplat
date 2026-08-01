@@ -759,56 +759,6 @@ class DepthPredictorMultiView(nn.Module):
         elif not enabled:
             self.lidar_cross_attention = None
 
-    def set_lidar_refine_mask_enabled(self, enabled: bool) -> None:
-        """Resize the refinement stem for checkpoint-selected inference."""
-        enabled = bool(enabled)
-        if enabled == self.use_lidar_refine_mask:
-            return
-
-        refine_stem = (
-            self.refine_unet[0]
-            if isinstance(self.refine_unet, nn.Sequential)
-            else self.refine_unet
-        )
-        if not isinstance(refine_stem, nn.Conv2d):
-            raise TypeError(
-                "The depth-refinement stem must be nn.Conv2d to toggle its "
-                "LiDAR-mask input channel."
-            )
-
-        input_channel_delta = 1 if enabled else -1
-        new_stem = nn.Conv2d(
-            in_channels=refine_stem.in_channels + input_channel_delta,
-            out_channels=refine_stem.out_channels,
-            kernel_size=refine_stem.kernel_size,
-            stride=refine_stem.stride,
-            padding=refine_stem.padding,
-            dilation=refine_stem.dilation,
-            groups=refine_stem.groups,
-            bias=refine_stem.bias is not None,
-            padding_mode=refine_stem.padding_mode,
-        ).to(
-            device=refine_stem.weight.device,
-            dtype=refine_stem.weight.dtype,
-        )
-        with torch.no_grad():
-            shared_input_channels = min(
-                refine_stem.in_channels,
-                new_stem.in_channels,
-            )
-            new_stem.weight[
-                :, :shared_input_channels
-            ].copy_(refine_stem.weight[:, :shared_input_channels])
-            if enabled:
-                new_stem.weight[:, -1].zero_()
-            if refine_stem.bias is not None:
-                new_stem.bias.copy_(refine_stem.bias)
-
-        if isinstance(self.refine_unet, nn.Sequential):
-            self.refine_unet[0] = new_stem
-        else:
-            self.refine_unet = new_stem
-        self.use_lidar_refine_mask = enabled
 
     def __init__(
         self,
@@ -829,7 +779,6 @@ class DepthPredictorMultiView(nn.Module):
         wo_cost_volume_refine=False,
         
         use_lidar_bias=False,
-        use_lidar_refine_mask=False,
         use_lidar_coarse_loss=False,
         use_lidar_refine_loss=False,
         use_learnable_lidar_bias_params=False,
@@ -857,7 +806,6 @@ class DepthPredictorMultiView(nn.Module):
         # Table 3: w/o U-Net
         self.wo_cost_volume_refine = wo_cost_volume_refine
         self.use_lidar_bias = use_lidar_bias
-        self.use_lidar_refine_mask = use_lidar_refine_mask
         self.use_lidar_coarse_loss = use_lidar_coarse_loss
         self.use_lidar_refine_loss = use_lidar_refine_loss
         self.use_learnable_lidar_bias_params = (
@@ -975,7 +923,7 @@ class DepthPredictorMultiView(nn.Module):
 
         # Depth refinement: 2D U-Net
         # + the full-resolution support of the low-resolution LiDAR bias.
-        input_channels = 3 + depth_unet_feat_dim + 1 + 1 + 1
+        input_channels = 3 + depth_unet_feat_dim + 1 + 1
         channels = depth_unet_feat_dim
         if wo_depth_refine:  # for ablations
             self.refine_unet = nn.Conv2d(input_channels, channels, 3, 1, 1)
@@ -1448,21 +1396,7 @@ class DepthPredictorMultiView(nn.Module):
             mode="bilinear",
             align_corners=True,
         )
-        # lidar_mask_low marks the low-resolution cells whose depth logits were
-        # modified by the LiDAR bias. Preserve that discrete support when
-        # lifting it to the depth-refinement resolution. The channel remains
-        # present but is all-zero when no LiDAR bias was applied.
-        lidar_bias_support_mask_full = torch.zeros_like(fullres_disps)
-        if (
-            need_lidar
-            and self.use_lidar_bias
-            and lidar_mask_low is not None
-        ):
-            lidar_bias_support_mask_full = F.interpolate(
-                lidar_mask_low,
-                size=fullres_disps.shape[-2:],
-                mode="nearest",
-            )
+
         # depth refinement
         proj_feat_in_fullres = self.upsampler(torch.cat((feat01, cnn_features), dim=1))
         proj_feature = self.proj_feature(proj_feat_in_fullres)
@@ -1472,7 +1406,6 @@ class DepthPredictorMultiView(nn.Module):
                 proj_feature,
                 fullres_disps,
                 pdf_max,
-                lidar_bias_support_mask_full,
             ),
             dim=1,
         ))

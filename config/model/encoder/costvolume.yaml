@@ -43,7 +43,6 @@ use_epipolar_trans: false      # Table B: w/ Epipolar Transformer
 
 # LiDAR guidance
 use_lidar_bias: false
-use_lidar_refine_mask: false
 use_lidar_coarse_loss: false
 use_lidar_refine_loss: false
 frozen_params: []

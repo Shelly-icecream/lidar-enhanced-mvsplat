@@ -59,7 +59,6 @@ class EncoderCostVolumeCfg:
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
     use_lidar_bias: bool
-    use_lidar_refine_mask: bool
     use_lidar_coarse_loss: bool
     use_lidar_refine_loss: bool
     use_learnable_lidar_bias_params: bool
@@ -85,15 +84,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
 
     def __init__(self, cfg: EncoderCostVolumeCfg) -> None:
         super().__init__(cfg)
-        if (
-            get_cfg().mode == "train"
-            and cfg.use_lidar_refine_mask
-            and not cfg.use_lidar_bias
-        ):
-            raise ValueError(
-                "use_lidar_refine_mask=true requires use_lidar_bias=true "
-                "during training."
-            )
         # multi-view Transformer backbone
         if cfg.use_epipolar_trans:
             self.epipolar_sampler = EpipolarSampler(
@@ -150,7 +140,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
             
             use_lidar_bias=cfg.use_lidar_bias,
-            use_lidar_refine_mask=cfg.use_lidar_refine_mask,
             use_lidar_coarse_loss=cfg.use_lidar_coarse_loss,
             use_lidar_refine_loss=cfg.use_lidar_refine_loss,
             use_learnable_lidar_bias_params=(
@@ -181,10 +170,11 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                     "No encoder parameters matched frozen prefix "
                     f"{frozen_prefix!r}."
                 )
-            print(
-                "==> Freeze encoder parameters: "
-                f"{frozen_prefix} ({len(matched_parameters)} tensors)"
-            )
+            if get_cfg().mode == "train":
+                print(
+                    "==> Freeze encoder parameters: "
+                    f"{frozen_prefix} ({len(matched_parameters)} tensors)"
+                )
         # Let the final cost-volume projection adapt to features modified by
         # LiDAR cross-attention, even when its parent module was frozen above.
         corr_refine_last_parameters = list(
@@ -192,11 +182,12 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         )
         for param in corr_refine_last_parameters:
             param.requires_grad_(True)
-        print(
-            "==> Unfreeze encoder parameters: "
-            "depth_predictor.corr_refine_net[-1] "
-            f"({len(corr_refine_last_parameters)} tensors)"
-        )
+        if get_cfg().mode == "train":
+            print(
+                "==> Unfreeze encoder parameters: "
+                "depth_predictor.corr_refine_net[-1] "
+                f"({len(corr_refine_last_parameters)} tensors)"
+            )
 
     def map_pdf_to_opacity(
         self,

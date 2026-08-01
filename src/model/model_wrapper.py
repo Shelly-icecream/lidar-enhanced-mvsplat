@@ -120,158 +120,17 @@ class ModelWrapper(LightningModule):
         # This is used for testing.
         self.benchmarker = Benchmarker()
         self.eval_cnt = 0
-        self._last_lidar_mask_weight_log_step = None
         self._last_lidar_cross_attention_grad_log_step = None
         if self.test_cfg.compute_scores:
             self.test_step_outputs = {}
             self.time_skip_steps_dict = {"encoder": 0, "decoder": 0}
             
     def on_load_checkpoint(self, checkpoint: dict) -> None:
-        """Make legacy checkpoints compatible and select inference LiDAR modules.
-
-        Adapt the depth-refinement stem when the configured model and
-        checkpoint differ only by the optional LiDAR-mask input channel.
-        Optimizer moments are adapted too when resuming training.
-
-        During training the YAML flags remain authoritative, which allows a
-        new learnable network to be initialized while fine-tuning an older
-        checkpoint that does not contain its weights.
-        """
+        """Make legacy checkpoints compatible and select inference LiDAR modules."""
         state_dict = checkpoint["state_dict"]
         is_training = get_cfg().mode == "train"
         depth_predictor = getattr(self.encoder, "depth_predictor", None)
-        refine_stem_suffixes = (
-            "encoder.depth_predictor.refine_unet.0.weight",
-            "encoder.depth_predictor.refine_unet.weight",
-        )
 
-        # Inference does not use the YAML refine-mask switch. The checkpoint
-        # stem shape is the source of truth, so rebuild the stem before
-        # load_state_dict sees it.
-        if not is_training and depth_predictor is not None:
-            checkpoint_stem_weights = [
-                weight
-                for key, weight in state_dict.items()
-                if key.endswith(refine_stem_suffixes)
-            ]
-            if len(checkpoint_stem_weights) != 1:
-                raise ValueError(
-                    "Expected exactly one depth-refinement stem weight in "
-                    f"the checkpoint, found {len(checkpoint_stem_weights)}."
-                )
-            refine_unet = depth_predictor.refine_unet
-            current_stem = (
-                refine_unet[0]
-                if isinstance(refine_unet, nn.Sequential)
-                else refine_unet
-            )
-            base_input_channels = current_stem.in_channels - int(
-                depth_predictor.use_lidar_refine_mask
-            )
-            checkpoint_input_channels = checkpoint_stem_weights[0].shape[1]
-            if checkpoint_input_channels == base_input_channels:
-                checkpoint_has_refine_mask = False
-            elif checkpoint_input_channels == base_input_channels + 1:
-                checkpoint_has_refine_mask = True
-            else:
-                raise ValueError(
-                    "Cannot infer the LiDAR refine-mask architecture: "
-                    f"checkpoint stem has {checkpoint_input_channels} input "
-                    f"channels, expected {base_input_channels} without mask "
-                    f"or {base_input_channels + 1} with mask."
-                )
-            depth_predictor.set_lidar_refine_mask_enabled(
-                checkpoint_has_refine_mask
-            )
-            if checkpoint_has_refine_mask:
-                depth_predictor.use_lidar_bias = True
-            print(
-                "==> Inference depth-refinement mask selected from checkpoint: "
-                f"{checkpoint_has_refine_mask}."
-            )
-
-        current_state_dict = self.state_dict()
-        migrated_parameter_names = []
-        migration_directions = set()
-
-        for key, old_weight in list(state_dict.items()):
-            if not key.endswith(refine_stem_suffixes):
-                continue
-            new_weight = current_state_dict.get(key)
-            if new_weight is None or old_weight.ndim != 4:
-                continue
-            expand_mask_channel = (
-                old_weight.shape[0] == new_weight.shape[0]
-                and old_weight.shape[1] + 1 == new_weight.shape[1]
-                and old_weight.shape[2:] == new_weight.shape[2:]
-            )
-            remove_mask_channel = (
-                old_weight.shape[0] == new_weight.shape[0]
-                and old_weight.shape[1] == new_weight.shape[1] + 1
-                and old_weight.shape[2:] == new_weight.shape[2:]
-            )
-            if not (expand_mask_channel or remove_mask_channel):
-                continue
-
-            if expand_mask_channel:
-                migrated_weight = old_weight.new_zeros(new_weight.shape)
-                migrated_weight[:, :old_weight.shape[1]].copy_(old_weight)
-                migration_directions.add("expanded")
-            else:
-                migrated_weight = old_weight[:, :new_weight.shape[1]].clone()
-                migration_directions.add("removed")
-            state_dict[key] = migrated_weight
-            migrated_parameter_names.append(key)
-
-        if migrated_parameter_names:
-            # Adam is constructed from self.parameters(), so checkpoint
-            # param-group order matches named_parameters() order. Expand any
-            # tensor-valued optimizer moments belonging to the migrated stem;
-            # scalar entries such as ``step`` are intentionally left intact.
-            parameter_names = [name for name, _ in self.named_parameters()]
-            parameter_indices = {
-                parameter_names.index(name)
-                for name in migrated_parameter_names
-                if name in parameter_names
-            }
-            for optimizer_state in checkpoint.get("optimizer_states", []):
-                flat_parameter_ids = [
-                    parameter_id
-                    for group in optimizer_state.get("param_groups", [])
-                    for parameter_id in group.get("params", [])
-                ]
-                for parameter_index in parameter_indices:
-                    if parameter_index >= len(flat_parameter_ids):
-                        continue
-                    parameter_id = flat_parameter_ids[parameter_index]
-                    moments = optimizer_state.get("state", {}).get(
-                        parameter_id, {}
-                    )
-                    expected_shape = current_state_dict[
-                        parameter_names[parameter_index]
-                    ].shape
-                    for moment_name, moment in list(moments.items()):
-                        if not(
-                            torch.is_tensor(moment)
-                            and moment.ndim == 4
-                            and moment.shape[0] == expected_shape[0]
-                            and moment.shape[2:] == expected_shape[2:]
-                            and abs(moment.shape[1] - expected_shape[1]) == 1
-                        ):
-                            continue
-                        if moment.shape[1] < expected_shape[1]:
-                            migrated_moment = moment.new_zeros(expected_shape)
-                            migrated_moment[:, :moment.shape[1]].copy_(moment)
-                        else:
-                            migrated_moment = moment[
-                                :, :expected_shape[1]
-                            ].clone()
-                        moments[moment_name] = migrated_moment
-
-            print(
-                "==> Adapted depth-refinement stem LiDAR-mask channel: "
-                f"{', '.join(sorted(migration_directions))}."
-            )
         if is_training:
             return
         legacy_prefix = "encoder.depth_predictor.lidar_depth_parameter_net."
@@ -339,42 +198,6 @@ class ModelWrapper(LightningModule):
             f"(cross-attention mode={getattr(depth_predictor, 'lidar_cross_attention_inference_mode', 'auto')})."
         )
 
-    def _log_lidar_mask_channel_weight(self) -> None:
-        """Print growth of the zero-initialized refinement mask channel."""
-        step = int(self.global_step)
-        if (
-            step % 50 != 0
-            or self.global_rank != 0
-            or self._last_lidar_mask_weight_log_step == step
-        ):
-            return
-
-        depth_predictor = getattr(self.encoder, "depth_predictor", None)
-        if not getattr(depth_predictor, "use_lidar_refine_mask", False):
-            return
-        refine_unet = getattr(depth_predictor, "refine_unet", None)
-        if refine_unet is None:
-            return
-        refine_stem = (
-            refine_unet[0]
-            if isinstance(refine_unet, nn.Sequential)
-            else refine_unet
-        )
-        if not isinstance(refine_stem, nn.Conv2d):
-            return
-
-        with torch.no_grad():
-            mask_weight = refine_stem.weight[:, -1]
-            print(
-                "[LiDAR Refine Mask Weight] "
-                f"step={step}, "
-                f"abs_mean={mask_weight.abs().mean().item():.8e}, "
-                f"l2_norm={mask_weight.norm().item():.8e}, "
-                f"abs_max={mask_weight.abs().max().item():.8e}"
-            )
-            print("==========================")
-        self._last_lidar_mask_weight_log_step = step
-
 
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
@@ -388,7 +211,6 @@ class ModelWrapper(LightningModule):
             False,
             scene_names=batch["scene"],
         )
-        self._log_lidar_mask_channel_weight()
         lidar_coarse_loss = getattr(gaussians, "lidar_coarse_loss", None)
         lidar_parameter_diagnostics = getattr(
             getattr(self.encoder, "depth_predictor", None),
