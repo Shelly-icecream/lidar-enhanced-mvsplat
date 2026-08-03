@@ -24,7 +24,7 @@ data_loader:
     persistent_workers: false   
 
 trainer:
-  max_steps: 2000
+  max_steps: 4000
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 0.5        
@@ -40,9 +40,9 @@ model:
     lidar_cross_attention_heads: 4
     use_lidar_coarse_loss: true
     use_lidar_refine_loss: true
-    frozen_params:
-      - backbone
-      - depth_predictor.corr_refine_net
+    frozen_params: []
+      #- backbone
+      #- depth_predictor.corr_refine_net
       #- depth_predictor.regressor_residual
       #- depth_predictor.depth_head_lowres
       #- depth_predictor.upsampler
@@ -113,7 +113,7 @@ test:
   save_video: false
 
 checkpointing:
-  load: checkpoints/epoch_12-step_2000.ckpt   
+  load: checkpoints/all2000.ckpt   
   resume: false                           
   every_n_train_steps: 200              
   save_top_k: -1                          

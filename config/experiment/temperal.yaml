@@ -37,13 +37,13 @@ model:
     use_lidar_cross_attention: false
     use_adaptive_lidar_fusion: false
     use_lidar_coarse_loss: false
-    use_lidar_refine_loss: true
-    frozen_params: [backbone]
-    lidar_loss_weight: 0.0
-    lidar_final_loss_weight: 0.05
+    use_lidar_refine_loss: false
+    frozen_params: []
+    lidar_loss_weight: 0.00
+    lidar_final_loss_weight: 0.00
     lidar_lambda_surface: 10.0
     lidar_lambda_free: 2.0
-    lidar_sigma_disp: 0.32
+    lidar_sigma_disp: 0.01
     lidar_free_margin: 0.5
     lidar_temperature: 5.0
     num_depth_candidates: 128
@@ -102,7 +102,7 @@ test:
   save_video: false
 
 checkpointing:
-  load: checkpoints/epoch_12-step_2000.ckpt   
+  load: checkpoints/re10k.ckpt   
   resume: false                           
   every_n_train_steps: 200              
   save_top_k: -1                          

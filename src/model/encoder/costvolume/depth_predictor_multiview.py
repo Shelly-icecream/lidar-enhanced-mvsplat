@@ -922,7 +922,6 @@ class DepthPredictorMultiView(nn.Module):
         )
 
         # Depth refinement: 2D U-Net
-        # + the full-resolution support of the low-resolution LiDAR bias.
         input_channels = 3 + depth_unet_feat_dim + 1 + 1
         channels = depth_unet_feat_dim
         if wo_depth_refine:  # for ablations

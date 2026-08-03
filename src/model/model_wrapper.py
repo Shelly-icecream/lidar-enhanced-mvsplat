@@ -211,6 +211,7 @@ class ModelWrapper(LightningModule):
             False,
             scene_names=batch["scene"],
         )
+
         lidar_coarse_loss = getattr(gaussians, "lidar_coarse_loss", None)
         lidar_parameter_diagnostics = getattr(
             getattr(self.encoder, "depth_predictor", None),
