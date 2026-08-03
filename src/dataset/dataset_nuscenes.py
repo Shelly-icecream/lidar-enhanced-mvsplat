@@ -461,8 +461,8 @@ class DatasetNuScenes(IterableDataset):
         c2w = ego_to_world @ cam_to_ego
 
         # nuScenes camera coords -> common NeRF/3DGS coords
-        flip = torch.diag(torch.tensor([1, -1, -1, 1], dtype=torch.float32))
-        c2w = c2w @ flip
+        #flip = torch.diag(torch.tensor([1, -1, -1, 1], dtype=torch.float32))
+        #c2w = c2w @ flip
 
         return image, c2w, K
 

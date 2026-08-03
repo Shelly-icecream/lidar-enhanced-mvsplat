@@ -1,5 +1,4 @@
 # @package _global_
-# Stage 1 trains with the LiDAR refine loss and freezes only the backbone.
 defaults:
   - override /dataset: nuscenes
   - override /model/encoder: costvolume
@@ -113,7 +112,7 @@ test:
   save_video: false
 
 checkpointing:
-  load: checkpoints/all2000.ckpt   
+  load: checkpoints/kll6000.ckpt   
   resume: false                           
   every_n_train_steps: 200              
   save_top_k: -1                          
