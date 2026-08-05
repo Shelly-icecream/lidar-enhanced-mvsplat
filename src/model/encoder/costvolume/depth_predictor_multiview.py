@@ -1179,6 +1179,11 @@ class DepthPredictorMultiView(nn.Module):
                         & (lidar_disp_low >= candidate_disp_min)
                         & (lidar_disp_low <= candidate_disp_max)
                     )
+                    candidate_keep_ratio = (
+                        candidate_mask.sum().float()
+                        / mask.sum().float().clamp_min(1.0)
+                    )
+
                     lidar_candidate_target = (
                         lidar_surface_prior
                         / lidar_surface_prior.sum(
@@ -1195,17 +1200,28 @@ class DepthPredictorMultiView(nn.Module):
                         lidar_candidate_target,
                         reduction="none",
                     ).sum(dim=1, keepdim=True)
-                    lidar_disparity_loss = error_after[mask].mean()
+
                     if candidate_mask.any():
+                        lidar_disparity_loss = error_after[
+                            candidate_mask
+                        ].mean()
                         lidar_candidate_loss = candidate_kl_map[
                             candidate_mask
                         ].mean()
                     else:
+                        lidar_disparity_loss = error_after.new_zeros(())
                         lidar_candidate_loss = candidate_kl_map.new_zeros(())
+                    print(
+                        "[LiDAR Coarse Loss] "
+                        f"candidate_keep_ratio="
+                        f"{candidate_keep_ratio.detach().item():.4f} "
+                        f"({candidate_mask.sum().item()}/"
+                        f"{mask.sum().item()}), "
+                        f"L_disp={lidar_disparity_loss.detach().item():.8f}"
+                    )
                     lidar_coarse_loss = (
-                        lidar_disparity_loss
-                        +
-                        1.0 * lidar_candidate_loss
+                        lidar_disparity_loss 
+                        #+ 0.1 * lidar_candidate_loss
                     )
                 else:
                     # Preserve the legacy expected-disparity loss when
