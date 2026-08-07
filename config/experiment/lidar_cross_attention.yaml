@@ -23,7 +23,7 @@ data_loader:
     persistent_workers: false   
 
 trainer:
-  max_steps: 4000
+  max_steps: 2000
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 0.5        
@@ -37,19 +37,21 @@ model:
     use_lidar_cross_attention: true
     lidar_cross_attention_dim: 128
     lidar_cross_attention_heads: 4
+    lidar_cross_attention_radius: 1
+    lidar_cross_attention_max_delta_logit: 10.0
     use_lidar_coarse_loss: true
     use_lidar_refine_loss: true
     frozen_params: 
       - backbone
       - depth_predictor.corr_refine_net
-      #- depth_predictor.regressor_residual
-      #- depth_predictor.depth_head_lowres
+      - depth_predictor.regressor_residual
+      - depth_predictor.depth_head_lowres
       #- depth_predictor.upsampler
       #- depth_predictor.proj_feature
       #- depth_predictor.refine_unet
       #- depth_predictor.to_disparity
       #- depth_predictor.to_gaussians
-    lidar_loss_weight: 0.08
+    lidar_loss_weight: 0.05
     lidar_final_loss_weight: 0.05
     lidar_lambda_surface: 10.0
     lidar_lambda_free: 2.0

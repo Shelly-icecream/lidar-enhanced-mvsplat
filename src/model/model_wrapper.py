@@ -185,7 +185,7 @@ class ModelWrapper(LightningModule):
         else:
             enable_lidar_cross_attention = False
         if enable_lidar_cross_attention:
-            architecture = "per-view LiDAR token cross-attention"
+            architecture = "local LiDAR cross-attention on depth logits"
         elif has_adaptive_fusion:
             architecture = "adaptive two-branch fusion"
         elif has_legacy_net:
@@ -307,9 +307,6 @@ class ModelWrapper(LightningModule):
         if should_log_cross_attention:
             parameters = dict(cross_attention.named_parameters())
             diagnostic_names = (
-                "output_proj.weight",
-                "cross_attention.in_proj_weight",
-                "cross_attention.out_proj.weight",
                 "query_proj.weight",
                 "lidar_attribute_encoder.0.weight",
                 "lidar_attribute_encoder.2.weight",

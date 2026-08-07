@@ -53,6 +53,8 @@ use_adaptive_lidar_fusion: false
 use_lidar_cross_attention: false
 lidar_cross_attention_dim: 128
 lidar_cross_attention_heads: 4
+lidar_cross_attention_radius: 4
+lidar_cross_attention_max_delta_logit: 15.0
 # Inference-only checkpoint override: auto | on | off.
 lidar_cross_attention_inference_mode: auto
 

@@ -66,6 +66,8 @@ class EncoderCostVolumeCfg:
     use_lidar_cross_attention: bool
     lidar_cross_attention_dim: int
     lidar_cross_attention_heads: int
+    lidar_cross_attention_radius: int
+    lidar_cross_attention_max_delta_logit: float
     lidar_cross_attention_inference_mode: str
     frozen_params: list[str]
     lidar_loss_weight: float
@@ -149,6 +151,10 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             use_lidar_cross_attention=cfg.use_lidar_cross_attention,
             lidar_cross_attention_dim=cfg.lidar_cross_attention_dim,
             lidar_cross_attention_heads=cfg.lidar_cross_attention_heads,
+            lidar_cross_attention_radius=cfg.lidar_cross_attention_radius,
+            lidar_cross_attention_max_delta_logit=(
+                cfg.lidar_cross_attention_max_delta_logit
+            ),
             lidar_cross_attention_inference_mode=(
                 cfg.lidar_cross_attention_inference_mode
             ),
@@ -175,19 +181,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                     "==> Freeze encoder parameters: "
                     f"{frozen_prefix} ({len(matched_parameters)} tensors)"
                 )
-        # Let the final cost-volume projection adapt to features modified by
-        # LiDAR cross-attention, even when its parent module was frozen above.
-        corr_refine_last_parameters = list(
-            self.depth_predictor.corr_refine_net[-1].parameters()
-        )
-        for param in corr_refine_last_parameters:
-            param.requires_grad_(True)
-        if get_cfg().mode == "train":
-            print(
-                "==> Unfreeze encoder parameters: "
-                "depth_predictor.corr_refine_net[-1] "
-                f"({len(corr_refine_last_parameters)} tensors)"
-            )
+
 
     def map_pdf_to_opacity(
         self,
