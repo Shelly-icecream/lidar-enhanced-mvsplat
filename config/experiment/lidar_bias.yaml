@@ -5,8 +5,8 @@ defaults:
   - override /loss: [mse, lpips]
 
 wandb:
-  name: nuscenes_stage1
-  tags: [nuscenes, stage1, finetune, visual_only]
+  name: nuscenes_lidar_bias
+  tags: [nuscenes, lidar_bias, lidar_refine]
 
 data_loader:
   train:
@@ -33,6 +33,7 @@ model:
   encoder:
     use_lidar_bias: true
     use_lidar_cross_attention: false
+    lidar_cross_attention_inference_mode: "off"
     lidar_cross_attention_dim: 128
     lidar_cross_attention_heads: 4
     use_lidar_coarse_loss: false
@@ -105,7 +106,7 @@ train:
 test:
   output_path: outputs/test     
   eval_time_skip_steps: 5
-  compute_scores: false
+  compute_scores: true
   save_image: true
   save_video: false
 
