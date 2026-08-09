@@ -294,62 +294,6 @@ class LidarTokenCrossAttention(nn.Module):
         )
         return visual_logits + delta_logits
 
-class AdaptiveLidarFusion(nn.Module):
-    """Predict interpretable visual-need and LiDAR-reliability gates."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        # Visual-only inputs: normalized entropy, inverse top-2 margin, and
-        # normalized disparity standard deviation.
-        self.visual_need_net = nn.Sequential(
-            nn.Conv2d(3, 16, 1),
-            nn.SiLU(),
-            nn.Conv2d(16, 8, 1),
-            nn.SiLU(),
-            nn.Conv2d(8, 1, 1),
-        )
-        # LiDAR/cross-modal inputs: normalized LiDAR disparity, visual-LiDAR
-        # residual, local point density, and local disparity disagreement.
-        self.lidar_reliability_net = nn.Sequential(
-            nn.Conv2d(4, 16, 1),
-            nn.SiLU(),
-            nn.Conv2d(16, 8, 1),
-            nn.SiLU(),
-            nn.Conv2d(8, 1, 1),
-        )
-        # Keep both sigmoid gates in their responsive, non-saturated region.
-        # With small final-layer weights, the initial outputs are approximately
-        # visual_need_gain=1.5 and lidar_reliability=0.8, so fusion_gain=1.2.
-        nn.init.normal_(
-            self.visual_need_net[-1].weight,
-            mean=0.0,
-            std=1e-3,
-        )
-        nn.init.zeros_(self.visual_need_net[-1].bias)
-        nn.init.normal_(
-            self.lidar_reliability_net[-1].weight,
-            mean=0.0,
-            std=1e-3,
-        )
-        nn.init.constant_(
-            self.lidar_reliability_net[-1].bias,
-            math.log(4.0),
-        )
-
-    def forward(
-        self,
-        visual_features: torch.Tensor,
-        lidar_features: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        visual_need_gain = 1.0 + torch.sigmoid(
-            self.visual_need_net(visual_features)
-        )
-        lidar_reliability = torch.sigmoid(
-            self.lidar_reliability_net(lidar_features)
-        )
-        fusion_gain = visual_need_gain * lidar_reliability
-        return visual_need_gain, lidar_reliability, fusion_gain
-
 def build_lidar_surface_prior(
     disp_candi_curr,
     lidar_disp_low,
@@ -378,12 +322,9 @@ def build_lidar_visibility_prior(
     lidar_mask,
     disp_candi_curr,
     target_hw,
-    depth_parameter_net=None,
-    adaptive_fusion_module=None,
     visual_depth_logits=None,
     lambda_surface=10.0,
     lambda_free=2.0,
-    lambda_delta_log_max=math.log(4.0),
     sigma_disp=0.32,
     free_margin=0.5,
     eps=1e-6,
@@ -507,9 +448,6 @@ def build_lidar_visibility_prior(
     
     disp_range = (disp_max - disp_min).clamp(min=eps)
 
-    visual_need_gain = torch.ones_like(lidar_disp_low)
-    lidar_reliability = torch.ones_like(lidar_disp_low)
-    fusion_gain = torch.ones_like(lidar_disp_low)
     normalized_entropy = torch.zeros_like(lidar_disp_low)
     normalized_residual = torch.zeros_like(lidar_disp_low)
     local_density = torch.zeros_like(lidar_disp_low)
@@ -526,10 +464,6 @@ def build_lidar_visibility_prior(
         visual_expected_disp = (
             visual_pdf * disp_candi_curr
         ).sum(dim=1, keepdim=True)
-        normalized_visual_disp = (
-            (visual_expected_disp - disp_min) / disp_range
-        ).clamp(0.0, 1.0)
-
         entropy = -(
             visual_pdf * visual_pdf.clamp_min(eps).log()
         ).sum(dim=1, keepdim=True)
@@ -573,55 +507,12 @@ def build_lidar_visibility_prior(
         normalized_residual = (
             (visual_expected_disp - lidar_disp_low).abs() / disp_range
         ).clamp(0.0, 1.0)
-        visual_features = torch.cat(
-            [
-                normalized_entropy,
-                inverse_margin,
-                normalized_visual_std,
-            ],
-            dim=1,
-        )
-        lidar_features = torch.cat(
-            [
-                normalized_lidar_disp,
-                normalized_residual,
-                local_density,
-                local_disp_disagreement,
-            ],
-            dim=1,
-        )
-        if adaptive_fusion_module is not None:
-            (
-                visual_need_gain,
-                lidar_reliability,
-                fusion_gain,
-            ) = adaptive_fusion_module(
-                visual_features,
-                lidar_features,
-            )
-
-    if adaptive_fusion_module is not None:
-        lambda_surface_map = torch.full_like(
-            lidar_disp_low, float(lambda_surface)
-        )
-        lambda_free_map = torch.full_like(
-            lidar_disp_low, float(lambda_free)
-        )
-    elif depth_parameter_net is None:
-        lambda_surface_map = torch.full_like(
-            lidar_disp_low, float(lambda_surface)
-        )
-        lambda_free_map = torch.full_like(
-            lidar_disp_low, float(lambda_free)
-        )
-    else:
-        delta_log_lambdas = (
-            torch.tanh(depth_parameter_net(normalized_lidar_disp))
-            * lambda_delta_log_max
-        )
-        delta_log_surface, delta_log_free = delta_log_lambdas.chunk(2, dim=1)
-        lambda_surface_map = float(lambda_surface) * delta_log_surface.exp()
-        lambda_free_map = float(lambda_free) * delta_log_free.exp()
+    lambda_surface_map = torch.full_like(
+        lidar_disp_low, float(lambda_surface)
+    )
+    lambda_free_map = torch.full_like(
+        lidar_disp_low, float(lambda_free)
+    )
         
     # 可选：第一次调用时打印统计量
     if not getattr(
@@ -693,7 +584,7 @@ def build_lidar_visibility_prior(
     lidar_bias = (
         lambda_surface_map * surface_prior
         - lambda_free_map * free_prior
-    ) * fusion_gain
+    )
 
     return (
         lidar_bias,
@@ -701,9 +592,6 @@ def build_lidar_visibility_prior(
         lidar_disp_low,
         lambda_surface_map,
         lambda_free_map,
-        visual_need_gain,
-        lidar_reliability,
-        fusion_gain,
         normalized_entropy,
         normalized_residual,
         local_density,
@@ -830,26 +718,6 @@ class DepthPredictorMultiView(nn.Module):
     """IMPORTANT: this model is in (v b), NOT (b v), due to some historical issues.
     keep this in mind when performing any operation related to the view dim"""
 
-    def set_lidar_depth_parameter_net_enabled(self, enabled: bool) -> None:
-        """Match the optional LiDAR-parameter network to a checkpoint."""
-        self.use_learnable_lidar_bias_params = enabled
-        if enabled and self.lidar_depth_parameter_net is None:
-            self.lidar_depth_parameter_net = nn.Sequential(
-                nn.Conv2d(1, 16, 1),
-                nn.SiLU(),
-                nn.Conv2d(16, 2, 1),
-            )
-            nn.init.zeros_(self.lidar_depth_parameter_net[-1].weight)
-            nn.init.zeros_(self.lidar_depth_parameter_net[-1].bias)
-        elif not enabled:
-            self.lidar_depth_parameter_net = None
-    def set_adaptive_lidar_fusion_enabled(self, enabled: bool) -> None:
-        self.use_adaptive_lidar_fusion = enabled
-        if enabled and self.adaptive_lidar_fusion is None:
-            self.adaptive_lidar_fusion = AdaptiveLidarFusion()
-        elif not enabled:
-            self.adaptive_lidar_fusion = None
-
     def set_lidar_cross_attention_enabled(self, enabled: bool) -> None:
         self.use_lidar_cross_attention = bool(enabled)
         if enabled and self.lidar_cross_attention is None:
@@ -885,8 +753,6 @@ class DepthPredictorMultiView(nn.Module):
         use_lidar_bias=False,
         use_lidar_coarse_loss=False,
         use_lidar_refine_loss=False,
-        use_learnable_lidar_bias_params=False,
-        use_adaptive_lidar_fusion=False,
         use_lidar_cross_attention=False,
         lidar_cross_attention_dim=128,
         lidar_cross_attention_heads=4,
@@ -914,10 +780,6 @@ class DepthPredictorMultiView(nn.Module):
         self.use_lidar_bias = use_lidar_bias
         self.use_lidar_coarse_loss = use_lidar_coarse_loss
         self.use_lidar_refine_loss = use_lidar_refine_loss
-        self.use_learnable_lidar_bias_params = (
-            use_learnable_lidar_bias_params
-        )
-        self.use_adaptive_lidar_fusion = use_adaptive_lidar_fusion
         self.use_lidar_cross_attention = use_lidar_cross_attention
         self.lidar_cross_attention_dim = lidar_cross_attention_dim
         self.lidar_cross_attention_heads = lidar_cross_attention_heads
@@ -937,14 +799,6 @@ class DepthPredictorMultiView(nn.Module):
             raise ValueError(
                 "LiDAR cross-attention requires cost-volume U-Net refinement."
             )
-        if (
-            self.use_learnable_lidar_bias_params
-            and self.use_adaptive_lidar_fusion
-        ):
-            raise ValueError(
-                "Legacy learnable LiDAR parameters and adaptive LiDAR "
-                "fusion cannot be enabled at the same time."
-            )
         self.lidar_lambda_surface = lidar_lambda_surface
         self.lidar_lambda_free = lidar_lambda_free
         self.lidar_sigma_disp = lidar_sigma_disp
@@ -955,13 +809,6 @@ class DepthPredictorMultiView(nn.Module):
                 "lidar_temperature must be positive, "
                 f"got {self.lidar_temperature}."
             )
-        self.lidar_lambda_delta_log_max = math.log(4.0)
-        self.lidar_depth_parameter_net = None
-        if self.use_learnable_lidar_bias_params:
-            self.set_lidar_depth_parameter_net_enabled(True)
-        self.adaptive_lidar_fusion = None
-        if self.use_adaptive_lidar_fusion:
-            self.set_adaptive_lidar_fusion_enabled(True)
         self.lidar_cross_attention = None
         if self.use_lidar_cross_attention:
             self.set_lidar_cross_attention_enabled(True)
@@ -1183,9 +1030,6 @@ class DepthPredictorMultiView(nn.Module):
                 lidar_disp_low,
                 lambda_surface_map,
                 lambda_free_map,
-                visual_need_gain,
-                lidar_reliability,
-                fusion_gain,
                 visual_entropy,
                 visual_lidar_residual,
                 lidar_local_density,
@@ -1195,12 +1039,9 @@ class DepthPredictorMultiView(nn.Module):
                 lidar_mask=lidar_mask,                # [B,V,1,H,W]
                 disp_candi_curr=disp_candi_curr,      # [v*b,D,1,1]
                 target_hw=depth_logits_vis.shape[-2:],    # (h,w)
-                depth_parameter_net=self.lidar_depth_parameter_net,
-                adaptive_fusion_module=self.adaptive_lidar_fusion,
                 visual_depth_logits=depth_logits_vis,
                 lambda_surface=self.lidar_lambda_surface,
                 lambda_free=self.lidar_lambda_free,
-                lambda_delta_log_max=self.lidar_lambda_delta_log_max,
                 sigma_disp=self.lidar_sigma_disp,
                 free_margin=self.lidar_free_margin,
             )
@@ -1344,15 +1185,6 @@ class DepthPredictorMultiView(nn.Module):
                     valid_parameter_cells = valid_low[:, :1]
                     surface_values = lambda_surface_map[valid_parameter_cells]
                     free_values = lambda_free_map[valid_parameter_cells]
-                    visual_need_values = visual_need_gain[
-                        valid_parameter_cells
-                    ]
-                    reliability_values = lidar_reliability[
-                        valid_parameter_cells
-                    ]
-                    fusion_gain_values = fusion_gain[
-                        valid_parameter_cells
-                    ]
                     entropy_values = visual_entropy[
                         valid_parameter_cells
                     ]
@@ -1409,42 +1241,6 @@ class DepthPredictorMultiView(nn.Module):
                         "lambda_free_mean": free_values.mean().detach(),
                         "lambda_free_min": free_values.min().detach(),
                         "lambda_free_max": free_values.max().detach(),
-                        "visual_need_gain_mean": (
-                            visual_need_values.mean().detach()
-                        ),
-                        "visual_need_gain_std": (
-                            visual_need_values.std(unbiased=False).detach()
-                        ),
-                        "visual_need_gain_min": (
-                            visual_need_values.min().detach()
-                        ),
-                        "visual_need_gain_max": (
-                            visual_need_values.max().detach()
-                        ),
-                        "lidar_reliability_mean": (
-                            reliability_values.mean().detach()
-                        ),
-                        "lidar_reliability_std": (
-                            reliability_values.std(unbiased=False).detach()
-                        ),
-                        "lidar_reliability_min": (
-                            reliability_values.min().detach()
-                        ),
-                        "lidar_reliability_max": (
-                            reliability_values.max().detach()
-                        ),
-                        "fusion_gain_mean": (
-                            fusion_gain_values.mean().detach()
-                        ),
-                        "fusion_gain_std": (
-                            fusion_gain_values.std(unbiased=False).detach()
-                        ),
-                        "fusion_gain_min": (
-                            fusion_gain_values.min().detach()
-                        ),
-                        "fusion_gain_max": (
-                            fusion_gain_values.max().detach()
-                        ),
                         "visual_entropy_mean": (
                             entropy_values.mean().detach()
                         ),

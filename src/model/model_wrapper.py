@@ -133,16 +133,12 @@ class ModelWrapper(LightningModule):
 
         if is_training:
             return
-        legacy_prefix = "encoder.depth_predictor.lidar_depth_parameter_net."
-        adaptive_prefix = "encoder.depth_predictor.adaptive_lidar_fusion."
+        legacy_lidar_prefix = "encoder.depth_predictor.lidar_depth_parameter_net."
         cross_attention_prefix = (
             "encoder.depth_predictor.lidar_cross_attention."
         )
         has_legacy_net = any(
-            key.startswith(legacy_prefix) for key in state_dict
-        )
-        has_adaptive_fusion = any(
-            key.startswith(adaptive_prefix) for key in state_dict
+            key.startswith(legacy_lidar_prefix) for key in state_dict
         )
         has_lidar_cross_attention = any(
             key.startswith(cross_attention_prefix) for key in state_dict
@@ -150,15 +146,9 @@ class ModelWrapper(LightningModule):
         
         if depth_predictor is None:
             return
-        if hasattr(depth_predictor, "set_lidar_depth_parameter_net_enabled"):
-            depth_predictor.set_lidar_depth_parameter_net_enabled(
-                has_legacy_net
-            )
-
-        if hasattr(depth_predictor, "set_adaptive_lidar_fusion_enabled"):
-            depth_predictor.set_adaptive_lidar_fusion_enabled(
-                has_adaptive_fusion
-            )
+        if has_legacy_net:
+            # Ignore legacy optional LiDAR modules from older checkpoints.
+            pass
         if hasattr(
             depth_predictor,
             "set_lidar_cross_attention_enabled",
@@ -186,10 +176,6 @@ class ModelWrapper(LightningModule):
             enable_lidar_cross_attention = False
         if enable_lidar_cross_attention:
             architecture = "local LiDAR cross-attention on depth logits"
-        elif has_adaptive_fusion:
-            architecture = "adaptive two-branch fusion"
-        elif has_legacy_net:
-            architecture = "legacy depth-conditioned parameters"
         else:
             architecture = "fixed analytic prior"
         print(
@@ -339,22 +325,6 @@ class ModelWrapper(LightningModule):
         ):
             return
 
-
-        adaptive_fusion = getattr(
-            depth_predictor,
-            "adaptive_lidar_fusion",
-            None,
-        )
-        if adaptive_fusion is None:
-            return
-
-        for name, param in adaptive_fusion.named_parameters():
-            grad = (
-                None
-                if param.grad is None
-                else param.grad.detach().abs().mean().item()
-            )
-            print(f"[Fusion grad] {name}: {grad}")
     def test_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         b, v, _, h, w = batch["target"]["image"].shape

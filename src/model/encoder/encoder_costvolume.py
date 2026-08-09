@@ -61,8 +61,6 @@ class EncoderCostVolumeCfg:
     use_lidar_bias: bool
     use_lidar_coarse_loss: bool
     use_lidar_refine_loss: bool
-    use_learnable_lidar_bias_params: bool
-    use_adaptive_lidar_fusion: bool
     use_lidar_cross_attention: bool
     lidar_cross_attention_dim: int
     lidar_cross_attention_heads: int
@@ -144,10 +142,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             use_lidar_bias=cfg.use_lidar_bias,
             use_lidar_coarse_loss=cfg.use_lidar_coarse_loss,
             use_lidar_refine_loss=cfg.use_lidar_refine_loss,
-            use_learnable_lidar_bias_params=(
-                cfg.use_learnable_lidar_bias_params
-            ),
-            use_adaptive_lidar_fusion=cfg.use_adaptive_lidar_fusion,
             use_lidar_cross_attention=cfg.use_lidar_cross_attention,
             lidar_cross_attention_dim=cfg.lidar_cross_attention_dim,
             lidar_cross_attention_heads=cfg.lidar_cross_attention_heads,
