@@ -112,10 +112,14 @@ model:
     use_lidar_refine_loss: true
     lidar_loss_weight: 0.0
     lidar_final_loss_weight: 0.05
-    frozen_params: []
+    frozen_params:
+      - backbone
+      - depth_predictor.corr_refine_net
+      - depth_predictor.regressor_residual
+      - depth_predictor.depth_head_lowres
 ```
 
-`frozen_params: []` 表示 backbone、cost volume、refinement U-Net 和 Gaussian head 均参与训练。所有主实验应使用一致的冻结策略。
+该设置冻结视觉 backbone 和 coarse-depth 分支，只训练 upsampler、projection、refinement U-Net、disparity/Gaussian head 等下游模块，使主消融更容易归因于 LiDAR Bias 与 refinement。所有训练对照组应使用相同冻结策略；`frozen_params: []` 仅用于可选的全模型端到端微调实验。
 
 ## 6. 测试与评测
 
