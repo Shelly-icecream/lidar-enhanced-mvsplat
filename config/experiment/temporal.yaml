@@ -23,7 +23,7 @@ data_loader:
     persistent_workers: false   
 
 trainer:
-  max_steps: 2000
+  max_steps: 6000
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 0.5        

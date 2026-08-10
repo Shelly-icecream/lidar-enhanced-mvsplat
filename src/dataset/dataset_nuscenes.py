@@ -201,7 +201,7 @@ class DatasetNuScenes(IterableDataset):
 
         【修改后】
         Each item explicitly stores:
-            context_sample_tokens = [t-2s, t-s]
+            context_sample_tokens = [t-s, t+s]
             target_sample_tokens  = [t]
 
         For example:
@@ -210,7 +210,7 @@ class DatasetNuScenes(IterableDataset):
             frame_stride      = 1
 
         Then:
-            context = [t-2, t-1]
+            context = [t-1, t+1]
             target  = [t]
         """
         split_scenes = create_splits_scenes()
@@ -235,12 +235,18 @@ class DatasetNuScenes(IterableDataset):
         items = []
         camera_name = self.cfg.camera_name
 
-        # 【修改】明确使用 context / target 数量，而不是简单 total_views 连续切分
         num_context = self.cfg.num_context_views
         num_target = self.cfg.num_target_views
         stride = self.cfg.frame_stride
+        
+        if num_context != 2:
+            raise ValueError(
+                "Current temporal NuScenes sampler expects num_context_views=2. "
+                f"Got num_context_views={num_context}."
+            )
+        if stride < 1:
+            raise ValueError(f"frame_stride must be positive, got {stride}.")
 
-        # 【新增】当前版本先建议 num_target_views=1，语义最清楚：历史帧 -> 当前帧
         if num_target != 1:
             raise ValueError(
                 "Current temporal NuScenes sampler expects num_target_views=1. "
@@ -273,37 +279,23 @@ class DatasetNuScenes(IterableDataset):
                 sample_tokens.append(token)
                 token = sample["next"]
 
-            # 【修改】构造历史帧 -> 当前帧：
-            # target 是当前帧 end；
-            # context 是它之前的 num_context 个历史帧。
-            #
-            # num_context=2, stride=1:
-            #   context = [end-2, end-1]
-            #   target  = [end]
-            #
-            # num_context=2, stride=2:
-            #   context = [end-4, end-2]
-            #   target  = [end]
-            min_end = num_context * stride
-
-            for end in range(min_end, len(sample_tokens)):
+            # num_context=2, stride=1: context=[t-1, t+1], target=[t].
+            # num_context=2, stride=2: context=[t-2, t+2], target=[t].
+            # Target-centered interpolation: [t-stride, t+stride] -> t.
+            for center in range(stride, len(sample_tokens) - stride):
                 context_sample_tokens = [
-                    sample_tokens[end - (num_context - i) * stride]
-                    for i in range(num_context)
+                    sample_tokens[center - stride],
+                    sample_tokens[center + stride],
                 ]
 
-                target_sample_tokens = [sample_tokens[end]]
+                target_sample_tokens = [sample_tokens[center]]
 
                 items.append(
                     {
                         "scene_name": scene_name,
-
-                        # 【新增】显式保存 context / target，避免后面靠顺序猜
                         "context_sample_tokens": context_sample_tokens,
                         "target_sample_tokens": target_sample_tokens,
-
-                        # 【新增】保存中心时间索引，方便 debug
-                        "target_time_index": end,
+                        "target_time_index": center,
                     }
                 )
 
