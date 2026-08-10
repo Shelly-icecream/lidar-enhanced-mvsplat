@@ -164,13 +164,18 @@ class DatasetNuScenes(IterableDataset):
         u = fx * (x / z) + cx
         v = fy * (y / z) + cy
 
-        u = u.long()
-        v = v.long()
-
-        in_image = (u >= 0) & (u < W) & (v >= 0) & (v < H)
+        in_image = (
+            (u >= 0)
+            & (u < W)
+            & (v >= 0)
+            & (v < H)
+        )
         u = u[in_image]
         v = v[in_image]
         z = z[in_image]
+
+        u = u.long()
+        v = v.long()
 
         if z.numel() == 0:
             depth = torch.zeros((1, H, W), dtype=torch.float32)
