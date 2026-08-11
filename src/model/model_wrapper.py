@@ -356,8 +356,22 @@ class ModelWrapper(LightningModule):
 
         # Save images.
         if self.test_cfg.save_image:
-            for index, color in zip(batch["target"]["index"][0], images_prob):
-                save_image(color, path / scene / f"color/{index:0>6}.png")
+            expected_image_shape = (176, 320)
+            assert rgb_gt.shape[-2:] == expected_image_shape, (
+                "Processed target images must be 320x176 (width x height), "
+                f"but got {tuple(rgb_gt.shape[-2:][::-1])}."
+            )
+            assert images_prob.shape[-2:] == expected_image_shape, (
+                "Predictions must be 320x176 (width x height), "
+                f"but got {tuple(images_prob.shape[-2:][::-1])}."
+            )
+
+            for index, target, prediction in zip(
+                batch["target"]["index"][0], rgb_gt, images_prob
+            ):
+                filename = f"{index.item():0>6}.png"
+                save_image(target, path / scene / "target_processed" / filename)
+                save_image(prediction, path / scene / "prediction" / filename)
 
         # save video
         if self.test_cfg.save_video:

@@ -1356,7 +1356,21 @@ class DepthPredictorMultiView(nn.Module):
                 near, "b v -> (v b) () () ()"
             )
             
-            raw_fine_disps = fullres_disps + delta_disps
+            # LiDAR-biased coarse disparities act as hard anchors.  Let the
+            # refinement head update pixels without LiDAR support, but do not
+            # let its residual overwrite disparities in LiDAR-supported cells.
+            if self.use_lidar_bias and lidar_mask_low is not None:
+                lidar_support_full = F.interpolate(
+                    lidar_mask_low.float(),
+                    size=delta_disps.shape[-2:],
+                    mode="nearest",
+                ).to(device=delta_disps.device, dtype=delta_disps.dtype)
+                raw_fine_disps = (
+                    fullres_disps
+                    + (1.0 - lidar_support_full) * delta_disps
+                )
+            else:
+                raw_fine_disps = fullres_disps + delta_disps
             fine_disps = raw_fine_disps.clamp(
                 min=disp_min,
                 max=disp_max,

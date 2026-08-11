@@ -5,8 +5,8 @@ defaults:
   - override /loss: [mse, lpips]
 
 wandb:
-  name: nuscenes_lidar_bias
-  tags: [nuscenes, lidar_bias, lidar_refine]
+  name: nuscenes_normal
+  tags: [nuscenes, normal, visual_only]
 
 data_loader:
   train:
@@ -23,7 +23,7 @@ data_loader:
     persistent_workers: false   
 
 trainer:
-  max_steps: 2000
+  max_steps: 6000
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 0.5        
@@ -31,25 +31,14 @@ trainer:
 # ----- model params -----
 model:
   encoder:
-    use_lidar_bias: true
+    use_lidar_bias: false
     use_lidar_cross_attention: false
     lidar_cross_attention_inference_mode: "off"
-    lidar_cross_attention_dim: 128
-    lidar_cross_attention_heads: 4
     use_lidar_coarse_loss: false
-    use_lidar_refine_loss: true
-    frozen_params: 
-      - backbone
-      - depth_predictor.corr_refine_net
-      - depth_predictor.regressor_residual
-      - depth_predictor.depth_head_lowres
-      - depth_predictor.upsampler
-      - depth_predictor.proj_feature
-      - depth_predictor.refine_unet
-      #- depth_predictor.to_disparity
-      - depth_predictor.to_gaussians
+    use_lidar_refine_loss: false
+    frozen_params: []
     lidar_loss_weight: 0.00
-    lidar_final_loss_weight: 0.05
+    lidar_final_loss_weight: 0.00
     lidar_lambda_surface: 10.0
     lidar_lambda_free: 2.0
     lidar_sigma_disp: 0.01
