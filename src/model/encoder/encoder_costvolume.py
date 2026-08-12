@@ -61,6 +61,7 @@ class EncoderCostVolumeCfg:
     use_lidar_bias: bool
     use_lidar_coarse_loss: bool
     use_lidar_refine_loss: bool
+    use_lidar_gaussian_adapter: bool
     use_lidar_cross_attention: bool
     lidar_cross_attention_dim: int
     lidar_cross_attention_heads: int
@@ -70,6 +71,9 @@ class EncoderCostVolumeCfg:
     frozen_params: list[str]
     lidar_loss_weight: float
     lidar_final_loss_weight: float
+    lidar_gaussian_residual_loss_weight: float
+    lidar_gaussian_scale_loss_weight: float
+    lidar_gaussian_gate_kernel: int
     lidar_lambda_surface: float
     lidar_lambda_free: float
     lidar_sigma_disp: float
@@ -130,6 +134,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             costvolume_unet_channel_mult=tuple(cfg.costvolume_unet_channel_mult),
             costvolume_unet_attn_res=tuple(cfg.costvolume_unet_attn_res),
             gaussian_raw_channels=cfg.num_surfaces * (self.gaussian_adapter.d_in + 2),
+            gaussian_channels_per_surface=self.gaussian_adapter.d_in + 2,
             gaussians_per_pixel=cfg.gaussians_per_pixel,
             num_views=get_cfg().dataset.view_sampler.num_context_views,
             depth_unet_feat_dim=cfg.depth_unet_feat_dim,
@@ -142,6 +147,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             use_lidar_bias=cfg.use_lidar_bias,
             use_lidar_coarse_loss=cfg.use_lidar_coarse_loss,
             use_lidar_refine_loss=cfg.use_lidar_refine_loss,
+            use_lidar_gaussian_adapter=cfg.use_lidar_gaussian_adapter,
             use_lidar_cross_attention=cfg.use_lidar_cross_attention,
             lidar_cross_attention_dim=cfg.lidar_cross_attention_dim,
             lidar_cross_attention_heads=cfg.lidar_cross_attention_heads,
@@ -157,6 +163,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             lidar_sigma_disp=cfg.lidar_sigma_disp,
             lidar_free_margin=cfg.lidar_free_margin,
             lidar_temperature=cfg.lidar_temperature,
+            lidar_gaussian_gate_kernel=cfg.lidar_gaussian_gate_kernel,
         )
 
         for frozen_prefix in cfg.frozen_params:
@@ -229,7 +236,15 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
         extra_info["scene_names"] = scene_names
         gpp = self.cfg.gaussians_per_pixel
-        depths, densities, raw_gaussians, lidar_coarse_loss, lidar_refine_loss = self.depth_predictor(
+        (
+            depths,
+            densities,
+            raw_gaussians,
+            lidar_coarse_loss,
+            lidar_refine_loss,
+            lidar_gaussian_residual_loss,
+            lidar_gaussian_scale_loss,
+        ) = self.depth_predictor(
             in_feats,
             context["intrinsics"],
             context["extrinsics"],
@@ -303,6 +318,8 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         )
         output_gaussians.lidar_coarse_loss = lidar_coarse_loss
         output_gaussians.lidar_refine_loss = lidar_refine_loss
+        output_gaussians.lidar_gaussian_residual_loss = lidar_gaussian_residual_loss
+        output_gaussians.lidar_gaussian_scale_loss = lidar_gaussian_scale_loss
 
         return output_gaussians
 

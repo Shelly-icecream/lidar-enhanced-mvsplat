@@ -38,6 +38,7 @@ model:
     lidar_cross_attention_heads: 4
     use_lidar_coarse_loss: false
     use_lidar_refine_loss: true
+    use_lidar_gaussian_adapter: false
     frozen_params: 
       - backbone
       - depth_predictor.corr_refine_net
@@ -50,6 +51,9 @@ model:
       - depth_predictor.to_gaussians
     lidar_loss_weight: 0.00
     lidar_final_loss_weight: 0.05
+    lidar_gaussian_residual_loss_weight: 0.001
+    lidar_gaussian_scale_loss_weight: 0.001
+    lidar_gaussian_gate_kernel: 5
     lidar_lambda_surface: 10.0
     lidar_lambda_free: 2.0
     lidar_sigma_disp: 0.01
