@@ -64,9 +64,74 @@ class DatasetNuScenes(IterableDataset):
         )
 
         self.items = self._build_index()
+
+    def _moving_vehicle_mask(
+        self,
+        sample_token: str,
+        camera_to_world: Tensor,
+        K_norm: Tensor,
+        image_shape: tuple[int, int],
+    ) -> Tensor:
+        """Return an expanded image mask for explicit vehicle.moving boxes."""
+        height, width = image_shape
+        mask = torch.zeros((1, height, width), dtype=torch.float32)
+        world_to_camera = self._invert_transform(camera_to_world)
+        sample = self.nusc.get("sample", sample_token)
+
+        for annotation_token in sample["anns"]:
+            annotation = self.nusc.get("sample_annotation", annotation_token)
+            attribute_names = {
+                self.nusc.get("attribute", token)["name"]
+                for token in annotation["attribute_tokens"]
+            }
+            if "vehicle.moving" not in attribute_names:
+                continue
+
+            corners_world = torch.from_numpy(
+                self.nusc.get_box(annotation_token).corners().T
+            ).to(dtype=torch.float32)
+            corners_h = torch.cat(
+                (corners_world, torch.ones((corners_world.shape[0], 1))),
+                dim=-1,
+            )
+            corners_camera = (world_to_camera @ corners_h.T).T[:, :3]
+            # Very small positive depths make perspective projection explode and
+            # can turn one partially visible box into an almost full-image mask.
+            visible = corners_camera[:, 2] > 0.1
+            if not visible.any():
+                continue
+
+            corners_camera = corners_camera[visible]
+            x, y, z = corners_camera.unbind(dim=-1)
+            u = K_norm[0, 0] * width * x / z + K_norm[0, 2] * width
+            v = K_norm[1, 1] * height * y / z + K_norm[1, 2] * height
+
+            x_min, x_max = u.min().item(), u.max().item()
+            y_min, y_max = v.min().item(), v.max().item()
+            if x_max < 0 or x_min >= width or y_max < 0 or y_min >= height:
+                continue
+
+            # Expand the part visible in the image. Using the unbounded projected
+            # extent would let a mostly off-screen box create a huge padding.
+            x_min_visible = max(0.0, x_min)
+            x_max_visible = min(float(width - 1), x_max)
+            y_min_visible = max(0.0, y_min)
+            y_max_visible = min(float(height - 1), y_max)
+            padding_x = max(8.0, 0.2 * (x_max_visible - x_min_visible))
+            padding_y = max(8.0, 0.2 * (y_max_visible - y_min_visible))
+            x0 = max(0, int(np.floor(x_min_visible - padding_x)))
+            x1 = min(width, int(np.ceil(x_max_visible + padding_x)) + 1)
+            y0 = max(0, int(np.floor(y_min_visible - padding_y)))
+            y1 = min(height, int(np.ceil(y_max_visible + padding_y)) + 1)
+            if x0 < x1 and y0 < y1:
+                mask[:, y0:y1, x0:x1] = 1.0
+
+        return mask
+
     @staticmethod
     def _invert_transform(T: Tensor) -> Tensor:
         return torch.linalg.inv(T)
+
     def _project_lidar_to_camera(
         self,
         lidar_sd_token: str,
@@ -409,6 +474,36 @@ class DatasetNuScenes(IterableDataset):
 
             example = apply_crop_shim(example, tuple(self.cfg.image_shape))
 
+            target_dynamic_masks = []
+            for i, target_idx in enumerate(target_indices.tolist()):
+                target_image = example["target"]["image"][i]
+                target_dynamic_masks.append(
+                    self._moving_vehicle_mask(
+                        sample_token=sample_tokens[target_idx],
+                        camera_to_world=example["target"]["extrinsics"][i],
+                        K_norm=example["target"]["intrinsics"][i],
+                        image_shape=tuple(target_image.shape[-2:]),
+                    )
+                )
+            example["target"]["dynamic_mask"] = torch.stack(
+                target_dynamic_masks, dim=0
+            )
+
+            context_dynamic_masks = []
+            for i, context_idx in enumerate(context_indices.tolist()):
+                context_image = example["context"]["image"][i]
+                context_dynamic_masks.append(
+                    self._moving_vehicle_mask(
+                        sample_token=sample_tokens[context_idx],
+                        camera_to_world=example["context"]["extrinsics"][i],
+                        K_norm=example["context"]["intrinsics"][i],
+                        image_shape=tuple(context_image.shape[-2:]),
+                    )
+                )
+            example["context"]["dynamic_mask"] = torch.stack(
+                context_dynamic_masks, dim=0
+            )
+
             # ===== 在 crop 之后生成 LiDAR depth / mask =====
             context_lidar_depths = []
             context_lidar_masks = []
@@ -423,6 +518,16 @@ class DatasetNuScenes(IterableDataset):
                 camera_sd_token=camera_sd_tokens[ctx_idx],
                 K_norm=K_norm,
                 image_shape=(H, W),)
+
+                # Remove moving-vehicle returns before any LiDAR tensor reaches
+                # the encoder. RGB context features and cost-volume construction
+                # remain untouched.
+                static_lidar_mask = lidar_mask * (
+                    1.0 - example["context"]["dynamic_mask"][i]
+                )
+                lidar_depth = lidar_depth * static_lidar_mask
+                lidar_world = lidar_world * static_lidar_mask
+                lidar_mask = static_lidar_mask
 
                 context_lidar_depths.append(lidar_depth)
                 context_lidar_masks.append(lidar_mask)

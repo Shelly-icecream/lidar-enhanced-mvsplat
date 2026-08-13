@@ -6,7 +6,7 @@ defaults:
 
 wandb:
   name: nuscenes_lidar_cross_attention
-  tags: [nuscenes, lidar_cross_attention, lidar_coarse, lidar_refine]
+  tags: [nuscenes, lidar_cross_attention, lidar_refine]
 
 data_loader:
   train:
@@ -31,14 +31,12 @@ trainer:
 # ----- model params -----
 model:
   encoder:
-    use_lidar_bias: false
     use_lidar_cross_attention: true
     lidar_cross_attention_inference_mode: "on"
     lidar_cross_attention_dim: 128
     lidar_cross_attention_heads: 4
     lidar_cross_attention_radius: 1
     lidar_cross_attention_max_delta_logit: 10.0
-    use_lidar_coarse_loss: true
     use_lidar_refine_loss: true
     frozen_params: 
       - backbone
@@ -50,13 +48,7 @@ model:
       #- depth_predictor.refine_unet
       #- depth_predictor.to_disparity
       #- depth_predictor.to_gaussians
-    lidar_loss_weight: 0.05
     lidar_final_loss_weight: 0.05
-    lidar_lambda_surface: 10.0
-    lidar_lambda_free: 2.0
-    lidar_sigma_disp: 0.01
-    lidar_free_margin: 0.5
-    lidar_temperature: 5.0
     num_depth_candidates: 128
     costvolume_unet_feat_dim: 128
     costvolume_unet_channel_mult: [1, 1, 1]
@@ -117,4 +109,4 @@ checkpointing:
   resume: false                           
   every_n_train_steps: 200              
   save_top_k: -1                          
-  pretrained_model: null                  
+  pretrained_model: null

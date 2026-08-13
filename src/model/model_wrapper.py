@@ -174,17 +174,6 @@ class ModelWrapper(LightningModule):
             )
         else:
             enable_lidar_cross_attention = False
-        if enable_lidar_cross_attention:
-            architecture = "local LiDAR cross-attention on depth logits"
-        else:
-            architecture = "fixed analytic prior"
-        print(
-            "==> Inference LiDAR architecture selected from checkpoint: "
-            f"{architecture} "
-            f"(cross-attention mode={getattr(depth_predictor, 'lidar_cross_attention_inference_mode', 'auto')})."
-        )
-
-
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         _, _, _, h, w = batch["target"]["image"].shape
@@ -198,14 +187,6 @@ class ModelWrapper(LightningModule):
             scene_names=batch["scene"],
         )
 
-        lidar_coarse_loss = getattr(gaussians, "lidar_coarse_loss", None)
-        lidar_parameter_diagnostics = getattr(
-            getattr(self.encoder, "depth_predictor", None),
-            "lidar_parameter_diagnostics",
-            {},
-        )
-        for name, value in lidar_parameter_diagnostics.items():
-            self.log(f"lidar_bias/{name}", value)
         lidar_refine_loss = getattr(gaussians, "lidar_refine_loss", None)
         output = self.decoder.forward(
             gaussians,
@@ -232,15 +213,8 @@ class ModelWrapper(LightningModule):
             self.log(f"loss/{loss_fn.name}", loss)
             total_loss = total_loss + loss
         cfg = get_cfg()
-        use_lidar_coarse_loss = cfg.model.encoder.use_lidar_coarse_loss
         use_lidar_refine_loss = cfg.model.encoder.use_lidar_refine_loss
-        lambda_lidar = cfg.model.encoder.lidar_loss_weight
         lambda_lidar_final = cfg.model.encoder.lidar_final_loss_weight
-
-        if use_lidar_coarse_loss and lidar_coarse_loss is not None and lambda_lidar > 0:
-            total_loss = total_loss + lambda_lidar * lidar_coarse_loss
-            self.log("loss/lidar_coarse", lidar_coarse_loss)
-            self.log("loss/lidar_coarse_weighted", lambda_lidar * lidar_coarse_loss)
 
         if use_lidar_refine_loss and lidar_refine_loss is not None and lambda_lidar_final > 0:
             total_loss = total_loss + lambda_lidar_final * lidar_refine_loss
@@ -501,15 +475,6 @@ class ModelWrapper(LightningModule):
                 ) ** 0.5,
             }
 
-            if get_cfg().model.encoder.use_lidar_bias:
-                print(
-                    "[Final depth LiDAR metrics] "
-                    f"points={lidar_depth_metrics['num_points']}, "
-                    f"MAE={lidar_depth_metrics['mae']:.6f} m, "
-                    f"AbsRel={lidar_depth_metrics['abs_rel']:.6f}, "
-                    f"RMSE={lidar_depth_metrics['rmse']:.6f} m"
-                )
-            
             out_dir.mkdir(parents=True, exist_ok=True)
             with (out_dir / "final_depth_lidar_metrics.json").open("w") as f:
                 json.dump(lidar_depth_metrics, f, indent=2)

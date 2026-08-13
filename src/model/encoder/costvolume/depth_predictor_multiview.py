@@ -296,39 +296,12 @@ class LidarTokenCrossAttention(nn.Module):
         )
         return visual_logits + delta_logits
 
-def build_lidar_surface_prior(
-    disp_candi_curr,
-    lidar_disp_low,
-    lidar_mask_low,
-    sigma_disp,
-    eps=1e-6,
-):
-    """Build the shared LiDAR response over inverse-depth candidates."""
-    if sigma_disp <= 0:
-        raise ValueError(
-            f"sigma_disp must be positive, got {sigma_disp}."
-        )
-
-    surface_prior = torch.exp(
-        -0.5
-        * (
-            (disp_candi_curr - lidar_disp_low)
-            / max(float(sigma_disp), eps)
-        ).square()
-    )
-    return surface_prior * lidar_mask_low
-
-
-def build_lidar_visibility_prior(
+def build_lidar_guidance_inputs(
     lidar_depth,
     lidar_mask,
     disp_candi_curr,
     target_hw,
     visual_depth_logits=None,
-    lambda_surface=10.0,
-    lambda_free=2.0,
-    sigma_disp=0.32,
-    free_margin=0.5,
     eps=1e-6,
 ):
     """
@@ -343,8 +316,6 @@ def build_lidar_visibility_prior(
             (Hf, Wf)，与低分辨率 depth logits 相同。
 
     Returns:
-        lidar_bias:
-            [V*B, D, Hf, Wf]
         lidar_mask_low:
             [V*B, 1, Hf, Wf]
         lidar_disp_low:
@@ -431,27 +402,8 @@ def build_lidar_visibility_prior(
         stride=stride,
     )
 
-    # 还原物理深度，供自由空间项使用
-    lidar_depth_low = torch.where(
-        lidar_mask_low > 0.5,
-        1.0 / lidar_disp_low.clamp(min=eps),
-        torch.zeros_like(lidar_disp_low),
-    )
-    # Condition the two analytic-prior strengths on inverse depth. Normalizing
-    # against the current candidate range keeps the input stable across near/far
-    # settings. The predicted log offsets are bounded to a 1/4x--4x multiplier.
-    disp_min = disp_candi_curr.amin(dim=1, keepdim=True)
-    disp_max = disp_candi_curr.amax(dim=1, keepdim=True)
-    normalized_lidar_disp = (
-        (lidar_disp_low - disp_min)
-        / (disp_max - disp_min).clamp(min=eps)
-    ).clamp(0.0, 1.0)
-    
-    
-    disp_range = (disp_max - disp_min).clamp(min=eps)
-
+    # Normalize visual/LiDAR statistics for cross-attention inputs.
     normalized_entropy = torch.zeros_like(lidar_disp_low)
-    normalized_residual = torch.zeros_like(lidar_disp_low)
     local_density = torch.zeros_like(lidar_disp_low)
 
     if visual_depth_logits is not None:
@@ -463,24 +415,10 @@ def build_lidar_visibility_prior(
             visual_depth_logits.detach(),
             dim=1,
         )
-        visual_expected_disp = (
-            visual_pdf * disp_candi_curr
-        ).sum(dim=1, keepdim=True)
         entropy = -(
             visual_pdf * visual_pdf.clamp_min(eps).log()
         ).sum(dim=1, keepdim=True)
         normalized_entropy = entropy / math.log(visual_pdf.shape[1])
-
-        top2 = visual_pdf.topk(k=2, dim=1).values
-        inverse_margin = 1.0 - (top2[:, :1] - top2[:, 1:2])
-
-        visual_variance = (
-            visual_pdf
-            * (disp_candi_curr - visual_expected_disp).square()
-        ).sum(dim=1, keepdim=True)
-        normalized_visual_std = (
-            visual_variance.clamp_min(0.0).sqrt() / disp_range
-        ).clamp(0.0, 1.0)
 
         local_density = F.avg_pool2d(
             lidar_cell_density,
@@ -488,116 +426,12 @@ def build_lidar_visibility_prior(
             stride=1,
             padding=1,
         )
-        neighbor_disp_sum = F.avg_pool2d(
-            lidar_disp_low,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-        neighbor_count = F.avg_pool2d(
-            lidar_mask_low,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-        neighbor_disp_mean = (
-            neighbor_disp_sum / neighbor_count.clamp_min(eps)
-        )
-        local_disp_disagreement = (
-            (lidar_disp_low - neighbor_disp_mean).abs() / disp_range
-        ).clamp(0.0, 1.0)
-        normalized_residual = (
-            (visual_expected_disp - lidar_disp_low).abs() / disp_range
-        ).clamp(0.0, 1.0)
-    lambda_surface_map = torch.full_like(
-        lidar_disp_low, float(lambda_surface)
-    )
-    lambda_free_map = torch.full_like(
-        lidar_disp_low, float(lambda_free)
-    )
-        
-    # 可选：第一次调用时打印统计量
-    if not getattr(
-        build_lidar_visibility_prior,
-        "_printed_downsample_statistics",
-        False,
-    ):
-        with torch.no_grad():
-            original_count = (
-                valid_mask_float.flatten(1).sum(dim=1)
-            )
-
-            lowres_count = (
-                lidar_mask_low.flatten(1).sum(dim=1)
-            )
-
-            point_to_cell_ratio = (
-                lowres_count
-                / original_count.clamp(min=1)
-            )
-
-            coverage_ratio = (
-                lowres_count
-                / float(Hf * Wf)
-            )
-
-            print(
-                "[LiDAR Aggregation] "
-                f"input_shape={tuple(lidar_depth.shape)}, "
-                f"lowres_shape={tuple(lidar_mask_low.shape)}, "
-                f"scale=({scale_h},{scale_w}), "
-                f"original_per_view="
-                f"{original_count.detach().cpu().tolist()}, "
-                f"lowres_per_view="
-                f"{lowres_count.detach().cpu().tolist()}, "
-                f"point_to_cell_ratio="
-                f"{point_to_cell_ratio.detach().cpu().tolist()}, "
-                f"coverage_per_view="
-                f"{coverage_ratio.detach().cpu().tolist()}"
-            )
-
-        build_lidar_visibility_prior._printed_downsample_statistics = True
-
-    # 候选逆深度 [V*B,D,1,1]
-    disp_candi = disp_candi_curr
-
-    # 候选物理深度 [V*B,D,1,1]
-    depth_candi = 1.0 / disp_candi.clamp(min=eps)
-
-    # LiDAR 表面吸引项
-    surface_prior = build_lidar_surface_prior(
-        disp_candi_curr=disp_candi,
-        lidar_disp_low=lidar_disp_low,
-        lidar_mask_low=lidar_mask_low,
-        sigma_disp=sigma_disp,
-        eps=eps,
-    )
-
-    # LiDAR 表面前方的自由空间抑制项
-    free_prior = (
-        depth_candi
-        < (lidar_depth_low - free_margin)
-    ).to(dtype=lidar_depth.dtype)
-
-    free_prior = (
-        free_prior * lidar_mask_low
-    )
-
-    lidar_bias = (
-        lambda_surface_map * surface_prior
-        - lambda_free_map * free_prior
-    )
 
     return (
-        lidar_bias,
         lidar_mask_low,
         lidar_disp_low,
-        lambda_surface_map,
-        lambda_free_map,
         normalized_entropy,
-        normalized_residual,
         local_density,
-        surface_prior,
     )
 
 def warp_with_pose_depth_candidates(
@@ -752,8 +586,6 @@ class DepthPredictorMultiView(nn.Module):
         wo_cost_volume=False,
         wo_cost_volume_refine=False,
         
-        use_lidar_bias=False,
-        use_lidar_coarse_loss=False,
         use_lidar_refine_loss=False,
         use_lidar_cross_attention=False,
         lidar_cross_attention_dim=128,
@@ -761,11 +593,6 @@ class DepthPredictorMultiView(nn.Module):
         lidar_cross_attention_radius=4,
         lidar_cross_attention_max_delta_logit=15.0,
         lidar_cross_attention_inference_mode="auto",
-        lidar_lambda_surface=10.0,
-        lidar_lambda_free=2.0,
-        lidar_sigma_disp=0.12,
-        lidar_free_margin=0.5,
-        lidar_temperature=5.0,
         **kwargs,
     ):
         super(DepthPredictorMultiView, self).__init__()
@@ -779,8 +606,6 @@ class DepthPredictorMultiView(nn.Module):
         self.wo_cost_volume = wo_cost_volume
         # Table 3: w/o U-Net
         self.wo_cost_volume_refine = wo_cost_volume_refine
-        self.use_lidar_bias = use_lidar_bias
-        self.use_lidar_coarse_loss = use_lidar_coarse_loss
         self.use_lidar_refine_loss = use_lidar_refine_loss
         self.use_lidar_cross_attention = use_lidar_cross_attention
         self.lidar_cross_attention_dim = lidar_cross_attention_dim
@@ -801,29 +626,10 @@ class DepthPredictorMultiView(nn.Module):
             raise ValueError(
                 "LiDAR cross-attention requires cost-volume U-Net refinement."
             )
-        self.lidar_lambda_surface = lidar_lambda_surface
-        self.lidar_lambda_free = lidar_lambda_free
-        self.lidar_sigma_disp = lidar_sigma_disp
-        self.lidar_free_margin = lidar_free_margin
-        self.lidar_temperature = lidar_temperature
-        if self.lidar_temperature <= 0:
-            raise ValueError(
-                "lidar_temperature must be positive, "
-                f"got {self.lidar_temperature}."
-            )
         self.lidar_cross_attention = None
         if self.use_lidar_cross_attention:
             self.set_lidar_cross_attention_enabled(True)
-        self.lidar_parameter_diagnostics = {}
-        
-        # 用于统计整个测试集上的 LiDAR 三阶段误差
         self.lidar_diag = {
-            "num_points": 0,
-            "vis_error_sum": 0.0,
-            "bias_error_sum": 0.0,
-            "refine_delta_sum": 0.0,
-            "refine_improve_count": 0,
-            "refine_worsen_count": 0,
             "final_depth_num_points": 0,
             "final_depth_abs_error_sum": 0.0,
             "final_depth_abs_rel_sum": 0.0,
@@ -1011,40 +817,28 @@ class DepthPredictorMultiView(nn.Module):
         coarse_disps_vis = (disp_candi_curr * pdf_vis).sum(dim=1, keepdim=True)
         coarse_before_attention = coarse_disps_vis
 
-        lidar_coarse_loss = None
         lidar_refine_loss = None
         lidar_mask_low = None
         lidar_disp_low = None
         
         has_lidar = lidar_depth is not None and lidar_mask is not None
         need_lidar = has_lidar and (
-            self.use_lidar_bias
-            or self.use_lidar_coarse_loss
-            or self.use_lidar_refine_loss
+            self.use_lidar_refine_loss
             or self.use_lidar_cross_attention
         )
 
         if need_lidar:
             (
-                lidar_bias,
                 lidar_mask_low,
                 lidar_disp_low,
-                lambda_surface_map,
-                lambda_free_map,
                 visual_entropy,
-                visual_lidar_residual,
                 lidar_local_density,
-                lidar_surface_prior,
-            ) = build_lidar_visibility_prior(
+            ) = build_lidar_guidance_inputs(
                 lidar_depth=lidar_depth,              # [B,V,1,H,W]
                 lidar_mask=lidar_mask,                # [B,V,1,H,W]
                 disp_candi_curr=disp_candi_curr,      # [v*b,D,1,1]
                 target_hw=depth_logits_vis.shape[-2:],    # (h,w)
                 visual_depth_logits=depth_logits_vis,
-                lambda_surface=self.lidar_lambda_surface,
-                lambda_free=self.lidar_lambda_free,
-                sigma_disp=self.lidar_sigma_disp,
-                free_margin=self.lidar_free_margin,
             )
             if self.use_lidar_cross_attention:
                 if self.lidar_cross_attention is None:
@@ -1105,188 +899,13 @@ class DepthPredictorMultiView(nn.Module):
                         f"worsen_ratio="
                         f"{(error_improvement < 0).float().mean().item():.4f}"
                     )
-            # bias only changes the forward depth logits.
-            if self.use_lidar_bias:
-                # Soften visual logits only at valid LiDAR cells, then add the
-                # analytic surface/free-space bias. Non-LiDAR cells retain the
-                # original visual logits exactly.
-                depth_logits_calibrated = (
-                    depth_logits_vis * (1.0 - lidar_mask_low) + (depth_logits_vis / self.lidar_temperature) * lidar_mask_low
-             )
-                depth_logits_lidar = depth_logits_calibrated + lidar_bias
-            else:
-                depth_logits_lidar = depth_logits_vis
-            # loss only uses pure visual prediction before LiDAR bias.
-            if self.use_lidar_coarse_loss and mask.any():
-                if self.use_lidar_cross_attention:
-                    # Supervise only the expected coarse disparity. Candidate
-                    # range checks remain because out-of-range LiDAR cannot be
-                    # represented by the current plane-sweep hypotheses.
-                    candidate_disp_min = disp_candi_curr.amin(
-                        dim=1,
-                        keepdim=True,
-                    )
-                    candidate_disp_max = disp_candi_curr.amax(
-                        dim=1,
-                        keepdim=True,
-                    )
-                    candidate_mask = (
-                        mask
-                        & (lidar_disp_low >= candidate_disp_min)
-                        & (lidar_disp_low <= candidate_disp_max)
-                    )
-                    candidate_keep_ratio = (
-                        candidate_mask.sum().float()
-                        / mask.sum().float().clamp_min(1.0)
-                    )
-                    if candidate_mask.any():
-                        lidar_disparity_loss = error_after[
-                            candidate_mask
-                        ].mean()
-                    else:
-                        lidar_disparity_loss = error_after.new_zeros(())
-                    print(
-                        "[LiDAR Coarse Loss] "
-                        f"candidate_keep_ratio="
-                        f"{candidate_keep_ratio.detach().item():.4f} "
-                        f"({candidate_mask.sum().item()}/"
-                        f"{mask.sum().item()}), "
-                        f"L_disp={lidar_disparity_loss.detach().item():.8f}"
-                    )
-                    lidar_coarse_loss = lidar_disparity_loss 
-                else:
-                    # Preserve the legacy expected-disparity loss when
-                    # cross-attention is disabled.
-                    lidar_coarse_loss = error_after[mask].mean()
-        else:
-            depth_logits_lidar = depth_logits_vis 
 
         # softmax to get coarse depth and density
-        pdf = F.softmax(depth_logits_lidar, dim=1)  # [v*b, D, h, w]
+        pdf = F.softmax(depth_logits_vis, dim=1)  # [v*b, D, h, w]
         
         coarse_disps = (disp_candi_curr * pdf).sum(
             dim=1, keepdim=True
         )  # (vb, 1, h, w)
-        # ============================================================
-        # 低分辨率 LiDAR Bias 诊断
-        # 比较：
-        # 1. 纯视觉 coarse disparity
-        # 2. 加入 LiDAR bias 后的 coarse disparity
-        # ============================================================
-        if (
-            need_lidar
-            and self.use_lidar_bias
-            and lidar_mask_low is not None
-            and lidar_disp_low is not None
-        ):
-            with torch.no_grad():
-                valid_low = lidar_mask_low > 0.5
-
-                if valid_low.any():
-                    valid_parameter_cells = valid_low[:, :1]
-                    surface_values = lambda_surface_map[valid_parameter_cells]
-                    free_values = lambda_free_map[valid_parameter_cells]
-                    entropy_values = visual_entropy[
-                        valid_parameter_cells
-                    ]
-                    residual_values = visual_lidar_residual[
-                        valid_parameter_cells
-                    ]
-                    density_values = lidar_local_density[
-                        valid_parameter_cells
-                    ]
-                    bias_std_d = lidar_bias.std(dim=1, unbiased=False)
-                    visual_logits_std_d = depth_logits_vis.std(
-                        dim=1, unbiased=False
-                    )
-                    valid_2d = valid_low[:, 0]
-                    mean_bias_std = bias_std_d[valid_2d].mean()
-                    mean_visual_logits_std = visual_logits_std_d[
-                        valid_2d
-                    ].mean()
-                    bias_to_visual_std_ratio = (
-                        mean_bias_std
-                        / mean_visual_logits_std.clamp(min=1e-6)
-                    )
-                    tempered_visual_logits = (
-                        depth_logits_vis / self.lidar_temperature
-                    )
-                    top2_logits = tempered_visual_logits.topk(
-                        k=2,
-                        dim=1,
-                    ).values
-                    top2_margin = top2_logits[:, :1] - top2_logits[:, 1:2]
-
-                    visual_candidate_index = tempered_visual_logits.argmax(
-                        dim=1,
-                        keepdim=True,
-                    )
-                    lidar_candidate_index = (
-                        disp_candi_curr - lidar_disp_low
-                    ).abs().argmin(dim=1, keepdim=True)
-                    bias_at_visual_candidate = lidar_bias.gather(
-                        1,
-                        visual_candidate_index,
-                    )
-                    bias_at_lidar_candidate = lidar_bias.gather(
-                        1,
-                        lidar_candidate_index,
-                    )
-                    bias_advantage = (
-                        bias_at_lidar_candidate - bias_at_visual_candidate
-                    )
-                    self.lidar_parameter_diagnostics = {
-                        "lambda_surface_mean": surface_values.mean().detach(),
-                        "lambda_surface_min": surface_values.min().detach(),
-                        "lambda_surface_max": surface_values.max().detach(),
-                        "lambda_free_mean": free_values.mean().detach(),
-                        "lambda_free_min": free_values.min().detach(),
-                        "lambda_free_max": free_values.max().detach(),
-                        "visual_entropy_mean": (
-                            entropy_values.mean().detach()
-                        ),
-                        "visual_lidar_residual_mean": (
-                            residual_values.mean().detach()
-                        ),
-                        "lidar_local_density_mean": (
-                            density_values.mean().detach()
-                        ),
-                        "bias_std_d": mean_bias_std.detach(),
-                        "visual_logits_std_d": mean_visual_logits_std.detach(),
-                        "bias_to_visual_std_ratio": (
-                            bias_to_visual_std_ratio.detach()
-                        ),
-                    }
-                    # 纯视觉 coarse disparity 与 LiDAR 的误差
-                    err_vis_low = (
-                        coarse_disps_vis - lidar_disp_low
-                    ).abs()[valid_low]
-
-                    # 加 bias 后 coarse disparity 与 LiDAR 的误差
-                    err_bias_low = (
-                        coarse_disps - lidar_disp_low
-                    ).abs()[valid_low]
-
-                    # 误差得到了多大改善
-                    gain=(err_vis_low.mean() - err_bias_low.mean()).item()
-                    
-                    improve_ratio_low = (
-                        err_bias_low < err_vis_low
-                    ).float().mean()
-
-                    worsen_ratio_low = (
-                        err_bias_low > err_vis_low
-                    ).float().mean()
-
-                    print(
-                        "[LiDAR Lowres Bias Diagnostics] "
-                        f"valid_cells={int(valid_low.sum().item())}, "
-                        f"E_visual={err_vis_low.mean().item():.8f}, "
-                        f"E_bias={err_bias_low.mean().item():.8f}, "
-                        f"gain={gain:.8f}, "
-                        f"improve_ratio={improve_ratio_low.item():.4f}, "
-                        f"worsen_ratio={worsen_ratio_low.item():.4f}, "
-                        )
         pdf_max = torch.max(pdf, dim=1, keepdim=True)[0]  # argmax
         pdf_max = F.interpolate(pdf_max, scale_factor=self.upscale_factor)
         fullres_disps = F.interpolate(
@@ -1375,59 +994,13 @@ class DepthPredictorMultiView(nn.Module):
                     & (lidar_depth_full > 1e-6)
                 )
 
-            # Keep only the original full-resolution valid LiDAR pixels as
-            # hard anchors.  Do not expand a sparse LiDAR sample to the whole
-            # low-resolution cell when suppressing the refinement residual.
-            if self.use_lidar_bias and valid is not None:
-                lidar_support_full = valid.to(dtype=delta_disps.dtype)
-                raw_fine_disps = (
-                    fullres_disps
-                    + (1.0 - lidar_support_full) * delta_disps
-                )
-            else:
-                raw_fine_disps = fullres_disps + delta_disps
+            raw_fine_disps = fullres_disps + delta_disps
             fine_disps = raw_fine_disps.clamp(
                 min=disp_min,
                 max=disp_max,
             )
 
-            # Report refinement health only when LiDAR bias is active. Keep
-            # the loss itself gated separately below.
             if valid is not None:
-                if self.use_lidar_bias and valid.any():
-                    with torch.no_grad():
-                        raw_final_disp = raw_fine_disps[:, :1]
-                        final_disp = fine_disps[:, :1]
-                        coarse_disp = fullres_disps[:, :1]
-                        delta_disp = delta_disps[:, :1]
-                        final_depth = 1.0 / final_disp.clamp_min(1e-6)
-
-                        print(
-                            "[Refine diagnostics] "
-                            f"coarse_mean="
-                            f"{coarse_disp[valid].mean().item():.6f}, "
-                            f"delta_mean="
-                            f"{delta_disp[valid].mean().item():.6f}, "
-                            f"delta_abs_mean="
-                            f"{delta_disp[valid].abs().mean().item():.6f}, "
-                            f"delta_min="
-                            f"{delta_disp[valid].min().item():.6f}, "
-                            f"delta_max="
-                            f"{delta_disp[valid].max().item():.6f}, "
-                            f"raw_min="
-                            f"{raw_final_disp[valid].min().item():.6f}, "
-                            f"raw_mean="
-                            f"{raw_final_disp[valid].mean().item():.6f}, "
-                            f"raw_max="
-                            f"{raw_final_disp[valid].max().item():.6f}, "
-                            f"final_depth_min="
-                            f"{final_depth[valid].min().item():.6f}, "
-                            f"final_depth_mean="
-                            f"{final_depth[valid].mean().item():.6f}, "
-                            f"final_depth_max="
-                            f"{final_depth[valid].max().item():.6f}"
-                        )
- 
                 if self.use_lidar_refine_loss and valid.any():
                     lidar_disp_full = 1.0 / lidar_depth_full.clamp(min=1e-6)
                     final_disp_for_loss = raw_fine_disps[:, :1]
@@ -1476,89 +1049,6 @@ class DepthPredictorMultiView(nn.Module):
                             (predicted_depth - target_depth).square().sum().item()
                         )
 
-            # ============================================================
-            # LiDAR 三阶段误差诊断：
-            # 1. 纯视觉 coarse depth
-            # 2. 注入 LiDAR bias 后的 coarse depth
-            # 3. refinement U-Net 后的 final depth
-            # ============================================================
-            if (
-                need_lidar
-                and self.use_lidar_bias
-                and lidar_depth is not None
-                and lidar_mask is not None
-            ):
-                with torch.no_grad():
-                    if valid.any():
-                        lidar_disp_full = (
-                            1.0 / lidar_depth_full.clamp(min=1e-6)
-                        )
-
-                        # 纯视觉 coarse disparity 上采样到全分辨率
-                        visual_coarse_full = F.interpolate(
-                            coarse_disps_vis,
-                            size=fine_disps.shape[-2:],
-                            mode="bilinear",
-                            align_corners=True,
-                        )
-
-                        # fullres_disps 就是：
-                        # 注入 LiDAR bias 后的 coarse disparity 上采样结果
-                        biased_coarse_full = fullres_disps
-
-                        # 当前实验 gaussians_per_pixel=1
-                        # 若以后使用多个 surface，这里暂时统计第一个
-                        final_disp_for_diag = fine_disps[:, :1]
-
-                        # 三阶段逐像素误差
-                        visual_error_map = (
-                            visual_coarse_full - lidar_disp_full
-                        ).abs()
-
-                        bias_error_map = (
-                            biased_coarse_full - lidar_disp_full
-                        ).abs()
-
-                        final_error_map = (
-                            final_disp_for_diag - lidar_disp_full
-                        ).abs()
-
-                        # refinement 实际改动了多少
-                        refine_delta_map = (
-                            final_disp_for_diag - biased_coarse_full
-                        ).abs()
-
-                        visual_error = visual_error_map[valid]
-                        bias_error = bias_error_map[valid]
-                        final_error = final_error_map[valid]
-                        refine_delta = refine_delta_map[valid]
-
-                        num_points = int(valid.sum().item())
-
-                        # 累加整个测试集，而不是只看单个 batch
-                        self.lidar_diag["num_points"] += num_points
-
-                        self.lidar_diag["vis_error_sum"] += (
-                            visual_error.sum().item()
-                        )
-
-                        self.lidar_diag["bias_error_sum"] += (
-                            bias_error.sum().item()
-                        )
-
-                        self.lidar_diag["refine_delta_sum"] += (
-                            refine_delta.sum().item()
-                        )
-
-                        # refinement 后比 bias coarse 更接近 LiDAR
-                        self.lidar_diag["refine_improve_count"] += int(
-                            (final_error < bias_error).sum().item()
-                        )
-
-                        # refinement 后反而离 LiDAR 更远
-                        self.lidar_diag["refine_worsen_count"] += int(
-                            (final_error > bias_error).sum().item()
-                        )            
             depths = 1.0 / fine_disps
             depths = repeat(
                 depths,
@@ -1572,6 +1062,5 @@ class DepthPredictorMultiView(nn.Module):
             depths,
             densities,
             raw_gaussians,
-            lidar_coarse_loss,
             lidar_refine_loss,
         )

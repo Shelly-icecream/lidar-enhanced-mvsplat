@@ -60,8 +60,6 @@ class EncoderCostVolumeCfg:
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
-    use_lidar_bias: bool
-    use_lidar_coarse_loss: bool
     use_lidar_refine_loss: bool
     use_lidar_world_mean_anchor: bool
     lidar_world_anchor_rescale_covariance: bool
@@ -81,13 +79,7 @@ class EncoderCostVolumeCfg:
     lidar_cross_attention_max_delta_logit: float
     lidar_cross_attention_inference_mode: str
     frozen_params: list[str]
-    lidar_loss_weight: float
     lidar_final_loss_weight: float
-    lidar_lambda_surface: float
-    lidar_lambda_free: float
-    lidar_sigma_disp: float
-    lidar_free_margin: float
-    lidar_temperature: float
 
 
 class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
@@ -220,8 +212,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             wo_cost_volume=cfg.wo_cost_volume,
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
             
-            use_lidar_bias=cfg.use_lidar_bias,
-            use_lidar_coarse_loss=cfg.use_lidar_coarse_loss,
             use_lidar_refine_loss=cfg.use_lidar_refine_loss,
             use_lidar_cross_attention=cfg.use_lidar_cross_attention,
             lidar_cross_attention_dim=cfg.lidar_cross_attention_dim,
@@ -233,11 +223,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             lidar_cross_attention_inference_mode=(
                 cfg.lidar_cross_attention_inference_mode
             ),
-            lidar_lambda_surface=cfg.lidar_lambda_surface,
-            lidar_lambda_free=cfg.lidar_lambda_free,
-            lidar_sigma_disp=cfg.lidar_sigma_disp,
-            lidar_free_margin=cfg.lidar_free_margin,
-            lidar_temperature=cfg.lidar_temperature,
         )
 
         for frozen_prefix in cfg.frozen_params:
@@ -315,7 +300,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             depths,
             densities,
             raw_gaussians,
-            lidar_coarse_loss,
             lidar_refine_loss,
         ) = self.depth_predictor(
             in_feats,
@@ -738,7 +722,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 "b v r srf spp -> b (v r srf spp)",
             ),
         )
-        output_gaussians.lidar_coarse_loss = lidar_coarse_loss
         output_gaussians.lidar_refine_loss = lidar_refine_loss
         if alpha_diagnostic_gaussians is not None:
             output_gaussians.alpha_diagnostic_gaussians = {
