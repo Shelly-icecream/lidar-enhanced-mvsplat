@@ -73,7 +73,7 @@ class DatasetNuScenes(IterableDataset):
         camera_sd_token: str,
         K_norm: Tensor,
         image_shape: tuple[int, int],
-    ) -> tuple[Tensor, Tensor]:
+    ) -> tuple[Tensor, Tensor, Tensor]:
         """
     Project LIDAR_TOP points to the given camera image plane.
 
@@ -86,6 +86,7 @@ class DatasetNuScenes(IterableDataset):
     Returns:
         lidar_depth: [1, H, W]
         lidar_mask:  [1, H, W]
+        lidar_world: [3, H, W], nearest projected point in world coordinates
         """
         H, W = image_shape
 
@@ -107,7 +108,8 @@ class DatasetNuScenes(IterableDataset):
         if pts.numel() == 0:
             depth = torch.zeros((1, H, W), dtype=torch.float32)
             mask = torch.zeros((1, H, W), dtype=torch.float32)
-            return depth, mask
+            world = torch.zeros((3, H, W), dtype=torch.float32)
+            return depth, mask, world
 
         # lidar -> ego(lidar time)
         T_lidar_to_ego = self._make_transform(
@@ -138,6 +140,7 @@ class DatasetNuScenes(IterableDataset):
 
         # transform points: lidar -> world -> camera
         pts_h = torch.cat([pts, torch.ones((pts.shape[0], 1))], dim=1)   # [N,4]
+        pts_world = (T_lidar_to_world @ pts_h.T).T[:, :3]
         pts_cam = (T_world_to_cam @ T_lidar_to_world @ pts_h.T).T[:, :3] # [N,3]
 
         x = pts_cam[:, 0]
@@ -149,11 +152,13 @@ class DatasetNuScenes(IterableDataset):
         x = x[valid]
         y = y[valid]
         z = z[valid]
+        pts_world = pts_world[valid]
 
         if z.numel() == 0:
             depth = torch.zeros((1, H, W), dtype=torch.float32)
             mask = torch.zeros((1, H, W), dtype=torch.float32)
-            return depth, mask
+            world = torch.zeros((3, H, W), dtype=torch.float32)
+            return depth, mask, world
 
         # normalized K -> pixel K
         fx = K_norm[0, 0] * W
@@ -173,6 +178,7 @@ class DatasetNuScenes(IterableDataset):
         u = u[in_image]
         v = v[in_image]
         z = z[in_image]
+        pts_world = pts_world[in_image]
 
         u = u.long()
         v = v.long()
@@ -180,7 +186,8 @@ class DatasetNuScenes(IterableDataset):
         if z.numel() == 0:
             depth = torch.zeros((1, H, W), dtype=torch.float32)
             mask = torch.zeros((1, H, W), dtype=torch.float32)
-            return depth, mask
+            world = torch.zeros((3, H, W), dtype=torch.float32)
+            return depth, mask, world
 
         # 同一像素可能投到多个点，保留最近深度
         linear_idx = v * W + u
@@ -189,12 +196,19 @@ class DatasetNuScenes(IterableDataset):
         # 需要 PyTorch 支持 scatter_reduce_
         depth_flat.scatter_reduce_(0, linear_idx, z, reduce="amin", include_self=True)
 
+        # Use camera Z only for visibility. Store the complete XYZ tuple of
+        # the selected point; reducing its components independently is invalid.
+        nearest = z <= depth_flat[linear_idx] + 1e-6
+        world_flat = torch.zeros((H * W, 3), dtype=torch.float32)
+        world_flat[linear_idx[nearest]] = pts_world[nearest]
+
         mask_flat = torch.isfinite(depth_flat)
         depth_flat[~mask_flat] = 0.0
 
         depth = depth_flat.view(1, H, W)
         mask = mask_flat.float().view(1, H, W)
-        return depth, mask
+        world = world_flat.view(H, W, 3).permute(2, 0, 1).contiguous()
+        return depth, mask, world
     def _build_index(self) -> list[dict]:
         """
         Build temporal windows on a single camera stream, e.g. CAM_FRONT.
@@ -398,12 +412,13 @@ class DatasetNuScenes(IterableDataset):
             # ===== 在 crop 之后生成 LiDAR depth / mask =====
             context_lidar_depths = []
             context_lidar_masks = []
+            context_lidar_worlds = []
 
             for i, ctx_idx in enumerate(context_indices.tolist()):
                 H, W = example["context"]["image"][i].shape[-2:]
                 K_norm = example["context"]["intrinsics"][i]
 
-                lidar_depth, lidar_mask = self._project_lidar_to_camera(
+                lidar_depth, lidar_mask, lidar_world = self._project_lidar_to_camera(
                 lidar_sd_token=lidar_sd_tokens[ctx_idx],
                 camera_sd_token=camera_sd_tokens[ctx_idx],
                 K_norm=K_norm,
@@ -411,9 +426,11 @@ class DatasetNuScenes(IterableDataset):
 
                 context_lidar_depths.append(lidar_depth)
                 context_lidar_masks.append(lidar_mask)
+                context_lidar_worlds.append(lidar_world)
 
             example["context"]["lidar_depth"] = torch.stack(context_lidar_depths, dim=0)  # [v,1,H,W]
             example["context"]["lidar_mask"] = torch.stack(context_lidar_masks, dim=0)    # [v,1,H,W]
+            example["context"]["lidar_world"] = torch.stack(context_lidar_worlds, dim=0)  # [v,3,H,W]
 
             yield example
 

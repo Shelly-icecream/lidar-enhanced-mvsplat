@@ -89,3 +89,44 @@ class DecoderSplattingCUDA(Decoder[DecoderSplattingCUDACfg]):
             mode=mode,
         )
         return rearrange(result, "(b v) h w -> b v h w", b=b, v=v)
+
+    def render_alpha(
+        self,
+        gaussians: Gaussians,
+        extrinsics: Float[Tensor, "batch view 4 4"],
+        intrinsics: Float[Tensor, "batch view 3 3"],
+        near: Float[Tensor, "batch view"],
+        far: Float[Tensor, "batch view"],
+        image_shape: tuple[int, int],
+    ) -> Float[Tensor, "batch view 1 height width"]:
+        """Render accumulated opacity as white splats over a black background."""
+        b, v, _, _ = extrinsics.shape
+        _, g, _ = gaussians.means.shape
+        white = torch.ones(
+            b,
+            g,
+            3,
+            1,
+            device=gaussians.means.device,
+            dtype=gaussians.means.dtype,
+        )
+        alpha_rgb = render_cuda(
+            rearrange(extrinsics, "b v i j -> (b v) i j"),
+            rearrange(intrinsics, "b v i j -> (b v) i j"),
+            rearrange(near, "b v -> (b v)"),
+            rearrange(far, "b v -> (b v)"),
+            image_shape,
+            torch.zeros(
+                b * v,
+                3,
+                device=gaussians.means.device,
+                dtype=gaussians.means.dtype,
+            ),
+            repeat(gaussians.means, "b g xyz -> (b v) g xyz", v=v),
+            repeat(gaussians.covariances, "b g i j -> (b v) g i j", v=v),
+            repeat(white, "b g c d -> (b v) g c d", v=v),
+            repeat(gaussians.opacities, "b g -> (b v) g", v=v),
+            use_sh=False,
+        )
+        alpha = alpha_rgb[:, :1].clamp(0.0, 1.0)
+        return rearrange(alpha, "(b v) c h w -> b v c h w", b=b, v=v)

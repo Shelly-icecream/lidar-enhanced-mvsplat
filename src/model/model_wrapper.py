@@ -207,12 +207,6 @@ class ModelWrapper(LightningModule):
         for name, value in lidar_parameter_diagnostics.items():
             self.log(f"lidar_bias/{name}", value)
         lidar_refine_loss = getattr(gaussians, "lidar_refine_loss", None)
-        lidar_gaussian_residual_loss = getattr(
-            gaussians, "lidar_gaussian_residual_loss", None
-        )
-        lidar_gaussian_scale_loss = getattr(
-            gaussians, "lidar_gaussian_scale_loss", None
-        )
         output = self.decoder.forward(
             gaussians,
             batch["target"]["extrinsics"],
@@ -242,8 +236,6 @@ class ModelWrapper(LightningModule):
         use_lidar_refine_loss = cfg.model.encoder.use_lidar_refine_loss
         lambda_lidar = cfg.model.encoder.lidar_loss_weight
         lambda_lidar_final = cfg.model.encoder.lidar_final_loss_weight
-        lambda_gaussian_residual = cfg.model.encoder.lidar_gaussian_residual_loss_weight
-        lambda_gaussian_scale = cfg.model.encoder.lidar_gaussian_scale_loss_weight
 
         if use_lidar_coarse_loss and lidar_coarse_loss is not None and lambda_lidar > 0:
             total_loss = total_loss + lambda_lidar * lidar_coarse_loss
@@ -254,14 +246,6 @@ class ModelWrapper(LightningModule):
             total_loss = total_loss + lambda_lidar_final * lidar_refine_loss
             self.log("loss/lidar_refine", lidar_refine_loss)
             self.log("loss/lidar_refine_weighted", lambda_lidar_final * lidar_refine_loss)
-        if lidar_gaussian_residual_loss is not None:
-            self.log("loss/lidar_gaussian_residual", lidar_gaussian_residual_loss)
-            if lambda_gaussian_residual > 0:
-                total_loss = total_loss + lambda_gaussian_residual * lidar_gaussian_residual_loss
-        if lidar_gaussian_scale_loss is not None:
-            self.log("loss/lidar_gaussian_scale_growth", lidar_gaussian_scale_loss)
-            if lambda_gaussian_scale > 0:
-                total_loss = total_loss + lambda_gaussian_scale * lidar_gaussian_scale_loss
         self.log("loss/total", total_loss)
 
         if (
@@ -370,6 +354,32 @@ class ModelWrapper(LightningModule):
         images_prob = output.color[0]
         rgb_gt = batch["target"]["image"][0]
 
+        alpha_diagnostics = None
+        diagnostic_gaussians = getattr(
+            gaussians,
+            "alpha_diagnostic_gaussians",
+            None,
+        )
+        if self.test_cfg.save_image and diagnostic_gaussians is not None:
+            render_alpha = getattr(self.decoder, "render_alpha", None)
+            if render_alpha is None:
+                raise RuntimeError(
+                    "Alpha diagnostics require a decoder with render_alpha()."
+                )
+            alpha_diagnostics = {
+                diagnostic_name: render_alpha(
+                    diagnostic_variant,
+                    batch["target"]["extrinsics"],
+                    batch["target"]["intrinsics"],
+                    batch["target"]["near"],
+                    batch["target"]["far"],
+                    (h, w),
+                )[0]
+                for diagnostic_name, diagnostic_variant in (
+                    diagnostic_gaussians.items()
+                )
+            }
+
         # Save images.
         if self.test_cfg.save_image:
             expected_image_shape = (176, 320)
@@ -388,6 +398,18 @@ class ModelWrapper(LightningModule):
                 filename = f"{index.item():0>6}.png"
                 save_image(target, path / scene / "target_processed" / filename)
                 save_image(prediction, path / scene / "prediction" / filename)
+
+            if alpha_diagnostics is not None:
+                for diagnostic_name, alpha_images in alpha_diagnostics.items():
+                    for index, alpha_image in zip(
+                        batch["target"]["index"][0],
+                        alpha_images,
+                    ):
+                        filename = f"{index.item():0>6}.png"
+                        save_image(
+                            alpha_image.expand(3, -1, -1),
+                            path / scene / diagnostic_name / filename,
+                        )
 
         # save video
         if self.test_cfg.save_video:
@@ -479,13 +501,14 @@ class ModelWrapper(LightningModule):
                 ) ** 0.5,
             }
 
-            print(
-                "[Final depth LiDAR metrics] "
-                f"points={lidar_depth_metrics['num_points']}, "
-                f"MAE={lidar_depth_metrics['mae']:.6f} m, "
-                f"AbsRel={lidar_depth_metrics['abs_rel']:.6f}, "
-                f"RMSE={lidar_depth_metrics['rmse']:.6f} m"
-            )
+            if get_cfg().model.encoder.use_lidar_bias:
+                print(
+                    "[Final depth LiDAR metrics] "
+                    f"points={lidar_depth_metrics['num_points']}, "
+                    f"MAE={lidar_depth_metrics['mae']:.6f} m, "
+                    f"AbsRel={lidar_depth_metrics['abs_rel']:.6f}, "
+                    f"RMSE={lidar_depth_metrics['rmse']:.6f} m"
+                )
             
             out_dir.mkdir(parents=True, exist_ok=True)
             with (out_dir / "final_depth_lidar_metrics.json").open("w") as f:
