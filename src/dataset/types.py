@@ -21,6 +21,8 @@ class BatchedViews(TypedDict, total=False):
     far: Float[Tensor, "batch _"]  # batch view
     index: Int64[Tensor, "batch _"]  # batch view
     dynamic_mask: Float[Tensor, "batch _ 1 height width"]
+    lidar_mask: Float[Tensor, "batch _ 1 height width"]
+    raw_lidar_mask: Float[Tensor, "batch _ 1 height width"]
 
 
 class BatchedExample(TypedDict, total=False):
@@ -37,6 +39,8 @@ class UnbatchedViews(TypedDict, total=False):
     far: Float[Tensor, " _"]
     index: Int64[Tensor, " _"]
     dynamic_mask: Float[Tensor, "_ 1 height width"]
+    lidar_mask: Float[Tensor, "_ 1 height width"]
+    raw_lidar_mask: Float[Tensor, "_ 1 height width"]
 
 
 class UnbatchedExample(TypedDict, total=False):

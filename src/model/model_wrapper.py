@@ -373,17 +373,54 @@ class ModelWrapper(LightningModule):
                 save_image(target, path / scene / "target_processed" / filename)
                 save_image(prediction, path / scene / "prediction" / filename)
 
+            context = batch["context"]
+            for index, image, dynamic_mask, raw_lidar_mask, filtered_lidar_mask in zip(
+                context["index"][0],
+                context["image"][0],
+                context["dynamic_mask"][0],
+                context["raw_lidar_mask"][0],
+                context["lidar_mask"][0],
+            ):
+                filename = f"{index.item():0>6}.png"
+                dynamic_mask = dynamic_mask.to(dtype=image.dtype)
+                red = torch.zeros_like(image)
+                red[0] = 1.0
+                mask_overlay = image * (1.0 - 0.45 * dynamic_mask) + red * (
+                    0.45 * dynamic_mask
+                )
+
+                save_image(
+                    mask_overlay,
+                    path / scene / "dynamic_mask_overlay" / filename,
+                )
+                save_image(
+                    raw_lidar_mask.expand(3, -1, -1),
+                    path / scene / "lidar_before_filter" / filename,
+                )
+                save_image(
+                    filtered_lidar_mask.expand(3, -1, -1),
+                    path / scene / "lidar_after_filter" / filename,
+                )
+
+                print(
+                    "[Dynamic Mask] "
+                    f"scene={scene}, context={index.item()}, "
+                    f"dynamic_ratio={dynamic_mask.float().mean().item():.6f}, "
+                    f"lidar_points_before={raw_lidar_mask.sum().item():.0f}, "
+                    f"lidar_points_after={filtered_lidar_mask.sum().item():.0f}"
+                )
+
             if alpha_diagnostics is not None:
-                for diagnostic_name, alpha_images in alpha_diagnostics.items():
-                    for index, alpha_image in zip(
-                        batch["target"]["index"][0],
-                        alpha_images,
-                    ):
-                        filename = f"{index.item():0>6}.png"
-                        save_image(
-                            alpha_image.expand(3, -1, -1),
-                            path / scene / diagnostic_name / filename,
-                        )
+                alpha_images = alpha_diagnostics["alpha_after_anchor_rescale"]
+                for index, alpha_image in zip(
+                    batch["target"]["index"][0],
+                    alpha_images,
+                ):
+                    filename = f"{index.item():0>6}.png"
+                    save_image(
+                        alpha_image.expand(3, -1, -1),
+                        path / scene / "alpha_after_anchor_rescale" / filename,
+                    )
 
         # save video
         if self.test_cfg.save_video:

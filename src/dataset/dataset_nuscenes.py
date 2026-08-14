@@ -507,6 +507,7 @@ class DatasetNuScenes(IterableDataset):
             # ===== 在 crop 之后生成 LiDAR depth / mask =====
             context_lidar_depths = []
             context_lidar_masks = []
+            context_raw_lidar_masks = []
             context_lidar_worlds = []
 
             for i, ctx_idx in enumerate(context_indices.tolist()):
@@ -518,6 +519,7 @@ class DatasetNuScenes(IterableDataset):
                 camera_sd_token=camera_sd_tokens[ctx_idx],
                 K_norm=K_norm,
                 image_shape=(H, W),)
+                raw_lidar_mask = lidar_mask.clone()
 
                 # Remove moving-vehicle returns before any LiDAR tensor reaches
                 # the encoder. RGB context features and cost-volume construction
@@ -531,10 +533,12 @@ class DatasetNuScenes(IterableDataset):
 
                 context_lidar_depths.append(lidar_depth)
                 context_lidar_masks.append(lidar_mask)
+                context_raw_lidar_masks.append(raw_lidar_mask)
                 context_lidar_worlds.append(lidar_world)
 
             example["context"]["lidar_depth"] = torch.stack(context_lidar_depths, dim=0)  # [v,1,H,W]
             example["context"]["lidar_mask"] = torch.stack(context_lidar_masks, dim=0)    # [v,1,H,W]
+            example["context"]["raw_lidar_mask"] = torch.stack(context_raw_lidar_masks, dim=0)  # [v,1,H,W]
             example["context"]["lidar_world"] = torch.stack(context_lidar_worlds, dim=0)  # [v,3,H,W]
 
             yield example

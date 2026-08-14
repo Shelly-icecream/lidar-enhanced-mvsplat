@@ -78,7 +78,7 @@ optimizer:
 loss:
   lpips:
     apply_after_step: 0
-    weight: 0.0
+    weight: 0.05
 
 # ----- dataset -----
 dataset:
