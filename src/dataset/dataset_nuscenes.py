@@ -4,6 +4,7 @@ from typing import Literal
 
 import torch
 import torchvision.transforms as tf
+from torchvision.utils import save_image
 from PIL import Image
 from torch import Tensor
 from torch.utils.data import IterableDataset
@@ -19,6 +20,13 @@ from .types import Stage
 from .view_sampler import ViewSampler
 import numpy as np
 from nuscenes.utils.data_classes import LidarPointCloud
+
+
+DYNAMIC_ATTRIBUTES = {
+    "vehicle.moving",
+    "pedestrian.moving",
+    "cycle.with_rider",
+}
 
 
 @dataclass
@@ -37,6 +45,11 @@ class DatasetNuScenesCfg(DatasetCfgCommon):
     num_context_views: int = 2
     num_target_views: int = 1
     frame_stride: int = 1
+    dynamic_mask_expansion_ratio: float = 0.15
+    dynamic_mask_min_padding_px: int = 8
+    dynamic_mask_min_depth: float = 0.01
+    save_dynamic_diagnostics: bool = False
+    dynamic_diagnostics_dir: Path = Path("outputs/dynamic_diagnostics")
 
 
 class DatasetNuScenes(IterableDataset):
@@ -62,11 +75,19 @@ class DatasetNuScenes(IterableDataset):
             dataroot=str(cfg.root),
             verbose=False,
         )
+        self.dynamic_attribute_tokens = {
+            attribute["token"]
+            for attribute in self.nusc.attribute
+            if attribute["name"] in DYNAMIC_ATTRIBUTES
+        }
+        self._dynamic_diagnostic_saved = False
 
         self.items = self._build_index()
+
     @staticmethod
     def _invert_transform(T: Tensor) -> Tensor:
         return torch.linalg.inv(T)
+
     def _project_lidar_to_camera(
         self,
         lidar_sd_token: str,
@@ -195,6 +216,139 @@ class DatasetNuScenes(IterableDataset):
         depth = depth_flat.view(1, H, W)
         mask = mask_flat.float().view(1, H, W)
         return depth, mask
+
+    def _project_dynamic_mask_to_camera(
+        self,
+        sample_token: str,
+        camera_sd_token: str,
+        K_norm: Tensor,
+        image_shape: tuple[int, int],
+    ) -> Tensor:
+        """Project dynamic nuScenes annotations to an image-space box mask."""
+        height, width = image_shape
+        dynamic_mask = torch.zeros((1, height, width), dtype=torch.float32)
+
+        sample = self.nusc.get("sample", sample_token)
+        camera_sd = self.nusc.get("sample_data", camera_sd_token)
+        camera_cs = self.nusc.get(
+            "calibrated_sensor", camera_sd["calibrated_sensor_token"]
+        )
+        camera_pose = self.nusc.get("ego_pose", camera_sd["ego_pose_token"])
+
+        camera_to_ego = self._make_transform(
+            camera_cs["translation"], camera_cs["rotation"]
+        )
+        ego_to_world = self._make_transform(
+            camera_pose["translation"], camera_pose["rotation"]
+        )
+        world_to_camera = self._invert_transform(ego_to_world @ camera_to_ego)
+
+        fx = K_norm[0, 0] * width
+        fy = K_norm[1, 1] * height
+        cx = K_norm[0, 2] * width
+        cy = K_norm[1, 2] * height
+
+        for annotation_token in sample["anns"]:
+            annotation = self.nusc.get("sample_annotation", annotation_token)
+            if not (
+                set(annotation["attribute_tokens"])
+                & self.dynamic_attribute_tokens
+            ):
+                continue
+
+            # get_box returns the annotation box in the global coordinate frame.
+            corners_world = torch.from_numpy(
+                self.nusc.get_box(annotation_token).corners().T
+            ).to(dtype=torch.float32)
+            corners_h = torch.cat(
+                [corners_world, torch.ones((corners_world.shape[0], 1))], dim=1
+            )
+            corners_camera = (world_to_camera @ corners_h.T).T[:, :3]
+            visible = corners_camera[:, 2] > self.cfg.dynamic_mask_min_depth
+            if not visible.any():
+                continue
+
+            corners_camera = corners_camera[visible]
+            projected_x = fx * (
+                corners_camera[:, 0] / corners_camera[:, 2]
+            ) + cx
+            projected_y = fy * (
+                corners_camera[:, 1] / corners_camera[:, 2]
+            ) + cy
+
+            xmin = projected_x.min().item()
+            xmax = projected_x.max().item()
+            ymin = projected_y.min().item()
+            ymax = projected_y.max().item()
+
+            # Test intersection before clipping so partially visible boxes survive.
+            if xmax < 0 or xmin >= width or ymax < 0 or ymin >= height:
+                continue
+
+            pad_x = max(
+                self.cfg.dynamic_mask_min_padding_px,
+                round((xmax - xmin) * self.cfg.dynamic_mask_expansion_ratio),
+            )
+            pad_y = max(
+                self.cfg.dynamic_mask_min_padding_px,
+                round((ymax - ymin) * self.cfg.dynamic_mask_expansion_ratio),
+            )
+            x0 = max(0, int(np.floor(xmin - pad_x)))
+            y0 = max(0, int(np.floor(ymin - pad_y)))
+            x1 = min(width, int(np.ceil(xmax + pad_x)) + 1)
+            y1 = min(height, int(np.ceil(ymax + pad_y)) + 1)
+            if x0 < x1 and y0 < y1:
+                dynamic_mask[:, y0:y1, x0:x1] = 1.0
+
+        return dynamic_mask
+
+    def _save_dynamic_diagnostics(
+        self,
+        image: Tensor,
+        dynamic_mask: Tensor,
+        raw_lidar_mask: Tensor,
+        filtered_lidar_mask: Tensor,
+        sample_token: str,
+        camera_sd_token: str,
+    ) -> None:
+        """Save three aligned overlays and print filtering statistics."""
+        output_dir = Path(self.cfg.dynamic_diagnostics_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        stem = f"{sample_token}_{camera_sd_token}"
+
+        def overlay(
+            mask: Tensor,
+            color: tuple[float, float, float],
+            alpha: float,
+        ) -> Tensor:
+            mask = mask.to(dtype=image.dtype).clamp(0, 1)
+            color_tensor = image.new_tensor(color).view(3, 1, 1)
+            return image * (1.0 - alpha * mask) + color_tensor * alpha * mask
+
+        save_image(
+            overlay(dynamic_mask, (1.0, 0.0, 0.0), 0.45),
+            output_dir / f"{stem}_dynamic_mask.png",
+        )
+        save_image(
+            overlay(raw_lidar_mask, (1.0, 0.2, 0.0), 0.9),
+            output_dir / f"{stem}_lidar_before.png",
+        )
+        save_image(
+            overlay(filtered_lidar_mask, (0.0, 1.0, 0.2), 0.9),
+            output_dir / f"{stem}_lidar_after.png",
+        )
+
+        dynamic_ratio = dynamic_mask.float().mean().item()
+        lidar_points_before = raw_lidar_mask.sum().item()
+        lidar_points_after = filtered_lidar_mask.sum().item()
+        print(
+            "[Dynamic diagnostics] "
+            f"dynamic_ratio={dynamic_ratio:.6f}, "
+            f"lidar_points_before={lidar_points_before:.0f}, "
+            f"lidar_points_after={lidar_points_after:.0f}, "
+            f"output_dir={output_dir}"
+        )
+
     def _build_index(self) -> list[dict]:
         """
         Build temporal windows on a single camera stream, e.g. CAM_FRONT.
@@ -390,30 +544,127 @@ class DatasetNuScenes(IterableDataset):
                 "scene": f"{scene_name}_{sample_tokens[0]}",
             }
 
-            if self.stage == "train" and self.cfg.augment:
-                example = apply_augmentation_shim(example)
-
             example = apply_crop_shim(example, tuple(self.cfg.image_shape))
+
+            # Build masks at the final image resolution. RGB remains untouched so
+            # visual features and the cost volume are still computed globally.
+            dynamic_masks = []
+            for view_idx, sample_token in enumerate(sample_tokens):
+                height, width = (
+                    example["context"]["image"][0].shape[-2:]
+                    if view_idx < num_context
+                    else example["target"]["image"][0].shape[-2:]
+                )
+                views = "context" if view_idx < num_context else "target"
+                local_idx = (
+                    view_idx if views == "context" else view_idx - num_context
+                )
+                dynamic_masks.append(
+                    self._project_dynamic_mask_to_camera(
+                        sample_token=sample_token,
+                        camera_sd_token=camera_sd_tokens[view_idx],
+                        K_norm=example[views]["intrinsics"][local_idx],
+                        image_shape=(height, width),
+                    )
+                )
+
+            example["context"]["dynamic_mask"] = torch.stack(
+                dynamic_masks[:num_context], dim=0
+            )
+            example["target"]["dynamic_mask"] = torch.stack(
+                dynamic_masks[num_context:], dim=0
+            )
 
             # ===== 在 crop 之后生成 LiDAR depth / mask =====
             context_lidar_depths = []
             context_lidar_masks = []
+            context_raw_lidar_masks = []
 
             for i, ctx_idx in enumerate(context_indices.tolist()):
                 H, W = example["context"]["image"][i].shape[-2:]
                 K_norm = example["context"]["intrinsics"][i]
 
                 lidar_depth, lidar_mask = self._project_lidar_to_camera(
-                lidar_sd_token=lidar_sd_tokens[ctx_idx],
-                camera_sd_token=camera_sd_tokens[ctx_idx],
-                K_norm=K_norm,
-                image_shape=(H, W),)
+                    lidar_sd_token=lidar_sd_tokens[ctx_idx],
+                    camera_sd_token=camera_sd_tokens[ctx_idx],
+                    K_norm=K_norm,
+                    image_shape=(H, W),
+                )
+
+                # Dynamic LiDAR points must be removed before any model branch
+                # can consume lidar_depth/lidar_mask.
+                static_mask = 1.0 - example["context"]["dynamic_mask"][i]
+                context_raw_lidar_masks.append(lidar_mask.clone())
+                lidar_mask = lidar_mask * static_mask
+                lidar_depth = lidar_depth * lidar_mask
 
                 context_lidar_depths.append(lidar_depth)
                 context_lidar_masks.append(lidar_mask)
 
-            example["context"]["lidar_depth"] = torch.stack(context_lidar_depths, dim=0)  # [v,1,H,W]
-            example["context"]["lidar_mask"] = torch.stack(context_lidar_masks, dim=0)    # [v,1,H,W]
+            example["context"]["lidar_depth"] = torch.stack(
+                context_lidar_depths, dim=0
+            )  # [v,1,H,W]
+            example["context"]["lidar_mask"] = torch.stack(
+                context_lidar_masks, dim=0
+            )  # [v,1,H,W]
+
+            # Project LiDAR into target views as well. These tensors are used
+            # only for target-space loss weighting and do not enter the
+            # encoder's context-side LiDAR branches.
+            target_lidar_depths = []
+            target_lidar_masks = []
+            for i, tgt_idx in enumerate(target_indices.tolist()):
+                H, W = example["target"]["image"][i].shape[-2:]
+                K_norm = example["target"]["intrinsics"][i]
+
+                lidar_depth, lidar_mask = self._project_lidar_to_camera(
+                    lidar_sd_token=lidar_sd_tokens[tgt_idx],
+                    camera_sd_token=camera_sd_tokens[tgt_idx],
+                    K_norm=K_norm,
+                    image_shape=(H, W),
+                )
+
+                static_mask = 1.0 - example["target"]["dynamic_mask"][i]
+                lidar_mask = lidar_mask * static_mask
+                lidar_depth = lidar_depth * lidar_mask
+                target_lidar_depths.append(lidar_depth)
+                target_lidar_masks.append(lidar_mask)
+
+            example["target"]["lidar_depth"] = torch.stack(
+                target_lidar_depths, dim=0
+            )
+            example["target"]["lidar_mask"] = torch.stack(
+                target_lidar_masks, dim=0
+            )
+
+            if (
+                self.cfg.save_dynamic_diagnostics
+                and not self._dynamic_diagnostic_saved
+                and example["context"]["dynamic_mask"].sum() > 0
+            ):
+                diagnostic_view = int(
+                    example["context"]["dynamic_mask"]
+                    .flatten(1)
+                    .sum(dim=1)
+                    .argmax()
+                    .item()
+                )
+                self._save_dynamic_diagnostics(
+                    image=example["context"]["image"][diagnostic_view],
+                    dynamic_mask=example["context"]["dynamic_mask"][diagnostic_view],
+                    raw_lidar_mask=context_raw_lidar_masks[diagnostic_view],
+                    filtered_lidar_mask=example["context"]["lidar_mask"][
+                        diagnostic_view
+                    ],
+                    sample_token=context_sample_tokens[diagnostic_view],
+                    camera_sd_token=camera_sd_tokens[diagnostic_view],
+                )
+                self._dynamic_diagnostic_saved = True
+
+            # Augment all aligned image-space tensors together. In particular,
+            # projected dynamic masks and filtered LiDAR must follow an RGB flip.
+            if self.stage == "train" and self.cfg.augment:
+                example = apply_augmentation_shim(example)
 
             yield example
 

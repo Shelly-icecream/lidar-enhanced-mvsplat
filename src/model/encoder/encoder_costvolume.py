@@ -269,12 +269,31 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         offset_xy = gaussians[..., :2].sigmoid()
         pixel_size = 1 / torch.tensor((w, h), dtype=torch.float32, device=device)
         xy_ray = xy_ray + (offset_xy - 0.5) * pixel_size
+
+        # The depth predictor and LiDAR branches use camera z-depth, while the
+        # shared GaussianAdapter multiplies depth by unit-length world rays.
+        # Convert every predicted z-depth to a ray distance using the same
+        # offset pixel coordinates that the adapter uses to construct rays.
+        homogeneous_xy = torch.cat(
+            (xy_ray, torch.ones_like(xy_ray[..., :1])),
+            dim=-1,
+        )
+        camera_rays = torch.linalg.solve(
+            rearrange(
+                context["intrinsics"],
+                "b v i j -> b v () () i j",
+            ),
+            homogeneous_xy.unsqueeze(-1),
+        ).squeeze(-1)
+        ray_norm = camera_rays.norm(dim=-1, keepdim=True)
+        gaussian_depths = depths * ray_norm
+
         gpp = self.cfg.gaussians_per_pixel
         gaussians = self.gaussian_adapter.forward(
             rearrange(context["extrinsics"], "b v i j -> b v () () () i j"),
             rearrange(context["intrinsics"], "b v i j -> b v () () () i j"),
             rearrange(xy_ray, "b v r srf xy -> b v r srf () xy"),
-            depths,
+            gaussian_depths,
             self.map_pdf_to_opacity(densities, global_step) / gpp,
             rearrange(
                 gaussians[..., 2:],

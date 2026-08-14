@@ -24,3 +24,9 @@ camera_name: CAM_FRONT
 num_context_views: 2
 num_target_views: 1
 frame_stride: 1
+
+dynamic_mask_expansion_ratio: 0.15
+dynamic_mask_min_padding_px: 8
+dynamic_mask_min_depth: 0.01
+save_dynamic_diagnostics: false
+dynamic_diagnostics_dir: outputs/dynamic_diagnostics

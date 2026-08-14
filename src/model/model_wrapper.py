@@ -236,6 +236,8 @@ class ModelWrapper(LightningModule):
         for loss_fn in self.losses:
             loss = loss_fn.forward(output, batch, gaussians, self.global_step)
             self.log(f"loss/{loss_fn.name}", loss)
+            for name, value in getattr(loss_fn, "diagnostics", {}).items():
+                self.log(f"loss/{name}", value)
             total_loss = total_loss + loss
         cfg = get_cfg()
         use_lidar_coarse_loss = cfg.model.encoder.use_lidar_coarse_loss
