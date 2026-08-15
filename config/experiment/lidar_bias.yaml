@@ -7,8 +7,8 @@ defaults:
 wandb:
   name: nuscenes_lidar_bias
   tags: [nuscenes, lidar_bias, lidar_refine]
-  mode: offline
-  entity: p
+  mode: online
+  entity: asdf5689-wuhan-university
 
 data_loader:
   train:
@@ -41,6 +41,12 @@ model:
     use_lidar_coarse_loss: false
     use_lidar_refine_loss: false
     use_lidar_gaussian_adapter: true
+
+    lidar_gaussian_edit_xy: false
+    lidar_gaussian_edit_scale: false
+    lidar_gaussian_edit_rotation: true
+    lidar_gaussian_edit_sh_dc: true
+    lidar_gaussian_edit_sh_rest: false
     frozen_params: 
       - backbone
       - depth_predictor.corr_refine_net
@@ -53,8 +59,6 @@ model:
       - depth_predictor.to_gaussians
     lidar_loss_weight: 0.00
     lidar_final_loss_weight: 0.05
-    lidar_gaussian_residual_loss_weight: 0.000
-    lidar_gaussian_scale_loss_weight: 0.000
     lidar_gaussian_gate_kernel: 5
     lidar_lambda_surface: 10.0
     lidar_lambda_free: 2.0

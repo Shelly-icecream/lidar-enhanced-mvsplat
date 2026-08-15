@@ -207,12 +207,6 @@ class ModelWrapper(LightningModule):
         for name, value in lidar_parameter_diagnostics.items():
             self.log(f"lidar_bias/{name}", value)
         lidar_refine_loss = getattr(gaussians, "lidar_refine_loss", None)
-        lidar_gaussian_residual_loss = getattr(
-            gaussians, "lidar_gaussian_residual_loss", None
-        )
-        lidar_gaussian_scale_loss = getattr(
-            gaussians, "lidar_gaussian_scale_loss", None
-        )
         output = self.decoder.forward(
             gaussians,
             batch["target"]["extrinsics"],
@@ -244,8 +238,6 @@ class ModelWrapper(LightningModule):
         use_lidar_refine_loss = cfg.model.encoder.use_lidar_refine_loss
         lambda_lidar = cfg.model.encoder.lidar_loss_weight
         lambda_lidar_final = cfg.model.encoder.lidar_final_loss_weight
-        lambda_gaussian_residual = cfg.model.encoder.lidar_gaussian_residual_loss_weight
-        lambda_gaussian_scale = cfg.model.encoder.lidar_gaussian_scale_loss_weight
 
         if use_lidar_coarse_loss and lidar_coarse_loss is not None and lambda_lidar > 0:
             total_loss = total_loss + lambda_lidar * lidar_coarse_loss
@@ -256,14 +248,6 @@ class ModelWrapper(LightningModule):
             total_loss = total_loss + lambda_lidar_final * lidar_refine_loss
             self.log("loss/lidar_refine", lidar_refine_loss)
             self.log("loss/lidar_refine_weighted", lambda_lidar_final * lidar_refine_loss)
-        if lidar_gaussian_residual_loss is not None:
-            self.log("loss/lidar_gaussian_residual", lidar_gaussian_residual_loss)
-            if lambda_gaussian_residual > 0:
-                total_loss = total_loss + lambda_gaussian_residual * lidar_gaussian_residual_loss
-        if lidar_gaussian_scale_loss is not None:
-            self.log("loss/lidar_gaussian_scale_growth", lidar_gaussian_scale_loss)
-            if lambda_gaussian_scale > 0:
-                total_loss = total_loss + lambda_gaussian_scale * lidar_gaussian_scale_loss
         self.log("loss/total", total_loss)
 
         if (

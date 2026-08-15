@@ -9,7 +9,7 @@ from .ldm_unet.unet import UNetModel
 
 
 class LidarGaussianCrossAttention(nn.Module):
-    """Sparse local cross-attention from visual pixels to valid LiDAR tokens."""
+    """Local cross-attention from LiDAR queries to surrounding Gaussians."""
 
     def __init__(
         self,
@@ -29,11 +29,16 @@ class LidarGaussianCrossAttention(nn.Module):
         self.radius = radius
         self.query_chunk_size = query_chunk_size
 
-        self.query_proj = nn.Linear(visual_dim + 2, attention_dim)
-        # A LiDAR token contains local visual context, normalized disparity,
-        # and its normalized image coordinates.
-        self.key_proj = nn.Linear(visual_dim + 3, attention_dim)
-        self.value_proj = nn.Linear(visual_dim + 3, attention_dim)
+        # A LiDAR query contains its visual feature, base raw Gaussian,
+        # normalized LiDAR disparity and image coordinates. Every surrounding
+        # pixel contributes a Gaussian K/V token; its LiDAR mask explicitly
+        # distinguishes visual-only tokens from LiDAR-supported tokens.
+        self.query_proj = nn.Linear(
+            visual_dim + output_dim + 3, attention_dim
+        )
+        token_dim = visual_dim + output_dim + 4
+        self.key_proj = nn.Linear(token_dim, attention_dim)
+        self.value_proj = nn.Linear(token_dim, attention_dim)
         self.output_head = nn.Sequential(
             nn.Linear(attention_dim, attention_dim),
             nn.GELU(),
@@ -45,6 +50,7 @@ class LidarGaussianCrossAttention(nn.Module):
     def forward(
         self,
         visual_features: torch.Tensor,
+        gaussian_features: torch.Tensor,
         lidar_mask: torch.Tensor,
         lidar_disp: torch.Tensor,
         query_gate: torch.Tensor,
@@ -54,6 +60,7 @@ class LidarGaussianCrossAttention(nn.Module):
             vb, self.output_head[-1].out_features, height, width
         )
         visual_flat = visual_features.flatten(2).transpose(1, 2)
+        gaussian_flat = gaussian_features.flatten(2).transpose(1, 2)
         lidar_mask_flat = lidar_mask[:, 0].flatten(1).bool()
         query_mask_flat = query_gate[:, 0].flatten(1) > 0
         lidar_disp_flat = lidar_disp[:, 0].flatten(1)
@@ -84,39 +91,36 @@ class LidarGaussianCrossAttention(nn.Module):
         local_offsets = torch.stack((offsets_x, offsets_y), dim=-1).reshape(-1, 2)
 
         for batch_index in range(vb):
-            lidar_indices = lidar_mask_flat[batch_index].nonzero(as_tuple=False)[:, 0]
             query_indices = query_mask_flat[batch_index].nonzero(as_tuple=False)[:, 0]
-            if lidar_indices.numel() == 0 or query_indices.numel() == 0:
+            if query_indices.numel() == 0:
                 continue
 
-            lidar_attributes = torch.cat(
+            all_attributes = torch.cat(
                 (
-                    visual_flat[batch_index, lidar_indices],
-                    lidar_disp_flat[batch_index, lidar_indices, None],
-                    normalized_xy[lidar_indices],
+                    visual_flat[batch_index],
+                    gaussian_flat[batch_index],
+                    lidar_disp_flat[batch_index, :, None],
+                    lidar_mask_flat[batch_index, :, None].to(
+                        visual_features.dtype
+                    ),
+                    normalized_xy,
                 ),
                 dim=-1,
             )
-            key = self.key_proj(lidar_attributes).reshape(
-                -1, self.num_heads, self.head_dim
-            )
-            value = self.value_proj(lidar_attributes).reshape(
-                -1, self.num_heads, self.head_dim
-            )
-            # Scatter sparse LiDAR K/V into flat image maps. Queries then gather
-            # only their fixed local window, avoiding a Q x all-LiDAR matrix.
-            key_map = visual_features.new_zeros(
+            key_map = self.key_proj(all_attributes).reshape(
                 height * width, self.num_heads, self.head_dim
             )
-            value_map = torch.zeros_like(key_map)
-            key_map[lidar_indices] = key
-            value_map[lidar_indices] = value
+            value_map = self.value_proj(all_attributes).reshape(
+                height * width, self.num_heads, self.head_dim
+            )
 
             for start in range(0, query_indices.numel(), self.query_chunk_size):
                 chunk_indices = query_indices[start : start + self.query_chunk_size]
                 query_input = torch.cat(
                     (
                         visual_flat[batch_index, chunk_indices],
+                        gaussian_flat[batch_index, chunk_indices],
+                        lidar_disp_flat[batch_index, chunk_indices, None],
                         normalized_xy[chunk_indices],
                     ),
                     dim=-1,
@@ -135,9 +139,7 @@ class LidarGaussianCrossAttention(nn.Module):
                 neighbor_x = neighbor_xy[..., 0].clamp(0, width - 1)
                 neighbor_y = neighbor_xy[..., 1].clamp(0, height - 1)
                 neighbor_indices = neighbor_y * width + neighbor_x
-                local_valid = (
-                    lidar_mask_flat[batch_index, neighbor_indices] & in_bounds
-                )
+                local_valid = in_bounds
                 local_key = key_map[neighbor_indices]
                 local_value = value_map[neighbor_indices]
                 scores = torch.einsum("qhd,qkhd->qhk", query, local_key)
@@ -902,6 +904,11 @@ class DepthPredictorMultiView(nn.Module):
         use_lidar_coarse_loss=False,
         use_lidar_refine_loss=False,
         use_lidar_gaussian_adapter=False,
+        lidar_gaussian_edit_xy=True,
+        lidar_gaussian_edit_scale=True,
+        lidar_gaussian_edit_rotation=True,
+        lidar_gaussian_edit_sh_dc=False,
+        lidar_gaussian_edit_sh_rest=False,
         use_lidar_cross_attention=False,
         lidar_cross_attention_dim=128,
         lidar_cross_attention_heads=4,
@@ -931,6 +938,11 @@ class DepthPredictorMultiView(nn.Module):
         self.use_lidar_coarse_loss = use_lidar_coarse_loss
         self.use_lidar_refine_loss = use_lidar_refine_loss
         self.use_lidar_gaussian_adapter = use_lidar_gaussian_adapter
+        self.lidar_gaussian_edit_xy = bool(lidar_gaussian_edit_xy)
+        self.lidar_gaussian_edit_scale = bool(lidar_gaussian_edit_scale)
+        self.lidar_gaussian_edit_rotation = bool(lidar_gaussian_edit_rotation)
+        self.lidar_gaussian_edit_sh_dc = bool(lidar_gaussian_edit_sh_dc)
+        self.lidar_gaussian_edit_sh_rest = bool(lidar_gaussian_edit_sh_rest)
         self.use_lidar_cross_attention = use_lidar_cross_attention
         self.lidar_cross_attention_dim = lidar_cross_attention_dim
         self.lidar_cross_attention_heads = lidar_cross_attention_heads
@@ -1075,8 +1087,8 @@ class DepthPredictorMultiView(nn.Module):
         # A zero-initialized residual branch preserves the pretrained Gaussian
         # head exactly at initialization. Only full-resolution LiDAR pixels are
         # queried and edited; each query can attend to nearby LiDAR tokens. The
-        # branch can only alter xy offset, scale and rotation, so SH stays
-        # bit-for-bit identical to the frozen base head.
+        # Editable channels are selected explicitly below for controlled
+        # geometry/color ablations.
         self.gaussian_raw_channels = gaussian_raw_channels
         self.gaussian_channels_per_surface = gaussian_channels_per_surface
         self.lidar_gaussian_adapter = None
@@ -1090,13 +1102,38 @@ class DepthPredictorMultiView(nn.Module):
             )
 
             editable = torch.zeros(1, gaussian_raw_channels, 1, 1)
+            color_dc = torch.zeros_like(editable)
             if gaussian_channels_per_surface < 9:
                 raise ValueError(
                     "gaussian_channels_per_surface must contain xy, scale and rotation channels."
                 )
+            sh_channels = gaussian_channels_per_surface - 9
+            if sh_channels % 3 != 0:
+                raise ValueError(
+                    "Gaussian SH channels must be divisible into RGB groups."
+                )
+            d_sh = sh_channels // 3
             for start in range(0, gaussian_raw_channels, gaussian_channels_per_surface):
-                editable[:, start : start + 9] = 1.0
+                if self.lidar_gaussian_edit_xy:
+                    editable[:, start : start + 2] = 1.0
+                if self.lidar_gaussian_edit_scale:
+                    editable[:, start + 2 : start + 5] = 1.0
+                if self.lidar_gaussian_edit_rotation:
+                    editable[:, start + 5 : start + 9] = 1.0
+                for color_index in range(3):
+                    dc_index = start + 9 + color_index * d_sh
+                    color_dc[:, dc_index] = 1.0
+                    if self.lidar_gaussian_edit_sh_dc:
+                        editable[:, dc_index] = 1.0
+                    if self.lidar_gaussian_edit_sh_rest:
+                        sh_start = start + 9 + color_index * d_sh
+                        editable[:, sh_start + 1 : sh_start + d_sh] = 1.0
+            if not editable.bool().any():
+                raise ValueError(
+                    "LiDAR Gaussian adapter is enabled but no editable channels are selected."
+                )
             self.register_buffer("lidar_gaussian_editable_channels", editable)
+            self.register_buffer("lidar_gaussian_color_dc_channels", color_dc)
 
         # Gaussians prediction: centers, opacity
         if not wo_depth_refine:
@@ -1191,8 +1228,6 @@ class DepthPredictorMultiView(nn.Module):
 
         lidar_coarse_loss = None
         lidar_refine_loss = None
-        lidar_gaussian_residual_loss = None
-        lidar_gaussian_scale_loss = None
         lidar_mask_low = None
         lidar_disp_low = None
         
@@ -1520,6 +1555,7 @@ class DepthPredictorMultiView(nn.Module):
 
             residual = self.lidar_gaussian_adapter(
                 visual_features=raw_gaussians_in,
+                gaussian_features=raw_gaussians,
                 lidar_mask=valid_full,
                 lidar_disp=lidar_disp_normalized,
                 query_gate=valid_full,
@@ -1530,24 +1566,20 @@ class DepthPredictorMultiView(nn.Module):
             gated_residual = residual * valid_full
 
             gate_mass = valid_full.sum().clamp_min(1.0)
-            editable_count = self.lidar_gaussian_editable_channels.sum().clamp_min(1.0)
-            lidar_gaussian_residual_loss = (
-                gated_residual.abs().sum() / (gate_mass * editable_count)
-            )
-
             scale_mask = torch.zeros_like(self.lidar_gaussian_editable_channels)
             for start in range(
                 0, self.gaussian_raw_channels, self.gaussian_channels_per_surface
             ):
                 scale_mask[:, start + 2 : start + 5] = 1.0
             scale_count = scale_mask.sum().clamp_min(1.0)
-            lidar_gaussian_scale_loss = (
-                F.relu(gated_residual * scale_mask).sum()
-                / (gate_mass * scale_count)
-            )
             with torch.no_grad():
                 scale_residual = gated_residual * scale_mask
                 scale_denominator = gate_mass * scale_count
+                color_residual = (
+                    gated_residual * self.lidar_gaussian_color_dc_channels
+                )
+                color_count = self.lidar_gaussian_color_dc_channels.sum().clamp_min(1.0)
+                color_denominator = gate_mass * color_count
                 self.lidar_parameter_diagnostics.update(
                     {
                         "gaussian_gate_coverage": (
@@ -1565,6 +1597,19 @@ class DepthPredictorMultiView(nn.Module):
                         ).sum().div(
                             valid_full.sum().clamp_min(1.0)
                             * scale_count
+                        ).detach(),
+                        "gaussian_color_dc_residual_mean": (
+                            color_residual.sum() / color_denominator
+                        ).detach(),
+                        "gaussian_color_dc_residual_abs_mean": (
+                            color_residual.abs().sum() / color_denominator
+                        ).detach(),
+                        "gaussian_color_dc_residual_abs_max": (
+                            color_residual.abs().amax()
+                        ).detach(),
+                        "gaussian_color_dc_changed_fraction": (
+                            (color_residual.abs() > 1e-6).float().sum()
+                            / color_denominator
                         ).detach(),
                     }
                 )
@@ -1830,6 +1875,4 @@ class DepthPredictorMultiView(nn.Module):
             raw_gaussians,
             lidar_coarse_loss,
             lidar_refine_loss,
-            lidar_gaussian_residual_loss,
-            lidar_gaussian_scale_loss,
         )

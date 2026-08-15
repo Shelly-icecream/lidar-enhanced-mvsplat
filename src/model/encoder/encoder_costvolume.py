@@ -62,6 +62,11 @@ class EncoderCostVolumeCfg:
     use_lidar_coarse_loss: bool
     use_lidar_refine_loss: bool
     use_lidar_gaussian_adapter: bool
+    lidar_gaussian_edit_xy: bool
+    lidar_gaussian_edit_scale: bool
+    lidar_gaussian_edit_rotation: bool
+    lidar_gaussian_edit_sh_dc: bool
+    lidar_gaussian_edit_sh_rest: bool
     use_lidar_cross_attention: bool
     lidar_cross_attention_dim: int
     lidar_cross_attention_heads: int
@@ -71,8 +76,6 @@ class EncoderCostVolumeCfg:
     frozen_params: list[str]
     lidar_loss_weight: float
     lidar_final_loss_weight: float
-    lidar_gaussian_residual_loss_weight: float
-    lidar_gaussian_scale_loss_weight: float
     lidar_gaussian_gate_kernel: int
     lidar_lambda_surface: float
     lidar_lambda_free: float
@@ -148,6 +151,11 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             use_lidar_coarse_loss=cfg.use_lidar_coarse_loss,
             use_lidar_refine_loss=cfg.use_lidar_refine_loss,
             use_lidar_gaussian_adapter=cfg.use_lidar_gaussian_adapter,
+            lidar_gaussian_edit_xy=cfg.lidar_gaussian_edit_xy,
+            lidar_gaussian_edit_scale=cfg.lidar_gaussian_edit_scale,
+            lidar_gaussian_edit_rotation=cfg.lidar_gaussian_edit_rotation,
+            lidar_gaussian_edit_sh_dc=cfg.lidar_gaussian_edit_sh_dc,
+            lidar_gaussian_edit_sh_rest=cfg.lidar_gaussian_edit_sh_rest,
             use_lidar_cross_attention=cfg.use_lidar_cross_attention,
             lidar_cross_attention_dim=cfg.lidar_cross_attention_dim,
             lidar_cross_attention_heads=cfg.lidar_cross_attention_heads,
@@ -242,8 +250,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             raw_gaussians,
             lidar_coarse_loss,
             lidar_refine_loss,
-            lidar_gaussian_residual_loss,
-            lidar_gaussian_scale_loss,
         ) = self.depth_predictor(
             in_feats,
             context["intrinsics"],
@@ -337,8 +343,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         )
         output_gaussians.lidar_coarse_loss = lidar_coarse_loss
         output_gaussians.lidar_refine_loss = lidar_refine_loss
-        output_gaussians.lidar_gaussian_residual_loss = lidar_gaussian_residual_loss
-        output_gaussians.lidar_gaussian_scale_loss = lidar_gaussian_scale_loss
 
         return output_gaussians
 

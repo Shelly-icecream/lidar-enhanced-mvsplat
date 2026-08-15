@@ -46,11 +46,14 @@ use_lidar_bias: false
 use_lidar_coarse_loss: false
 use_lidar_refine_loss: false
 use_lidar_gaussian_adapter: false
+lidar_gaussian_edit_xy: true
+lidar_gaussian_edit_scale: true
+lidar_gaussian_edit_rotation: true
+lidar_gaussian_edit_sh_dc: false
+lidar_gaussian_edit_sh_rest: false
 frozen_params: []
 lidar_loss_weight: 0.01
 lidar_final_loss_weight: 0.01
-lidar_gaussian_residual_loss_weight: 0.0
-lidar_gaussian_scale_loss_weight: 0.0
 lidar_gaussian_gate_kernel: 5
 use_lidar_cross_attention: false
 lidar_cross_attention_dim: 128
