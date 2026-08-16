@@ -46,8 +46,6 @@ model:
     use_lidar_bias: false
     use_lidar_cross_attention: false
     lidar_cross_attention_inference_mode: "off"
-    use_lidar_coarse_loss: false
-    use_lidar_refine_loss: false
     use_lidar_gaussian_adapter: false
 
     frozen_params:

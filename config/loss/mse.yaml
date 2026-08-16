@@ -1,4 +1,3 @@
 mse:
   weight: 1.0
   target_lidar_center_weight: 1.0
-  target_lidar_neighbor_weight: 1.0

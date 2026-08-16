@@ -58,6 +58,7 @@ test:
   eval_time_skip_steps: 0
   save_image: true
   save_video: false
+  save_lidar_alpha_diagnostics: false
 
 seed: 111123
 

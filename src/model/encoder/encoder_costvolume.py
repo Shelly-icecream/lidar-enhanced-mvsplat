@@ -59,14 +59,20 @@ class EncoderCostVolumeCfg:
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
     use_lidar_bias: bool
-    use_lidar_coarse_loss: bool
-    use_lidar_refine_loss: bool
     use_lidar_gaussian_adapter: bool
     lidar_gaussian_edit_xy: bool
     lidar_gaussian_edit_scale: bool
     lidar_gaussian_edit_rotation: bool
     lidar_gaussian_edit_sh_dc: bool
     lidar_gaussian_edit_sh_rest: bool
+    lidar_gaussian_edit_opacity: bool
+    lidar_gaussian_opacity_max_delta_logit: float
+    use_lidar_gaussian_adapter_loss: bool
+    lidar_gaussian_adapter_local_rgb_weight: float
+    lidar_gaussian_adapter_improvement_weight: float
+    lidar_gaussian_adapter_improvement_margin: float
+    lidar_gaussian_adapter_alpha_weight: float
+    lidar_gaussian_context_render_weight: float
     use_lidar_cross_attention: bool
     lidar_cross_attention_dim: int
     lidar_cross_attention_heads: int
@@ -74,8 +80,6 @@ class EncoderCostVolumeCfg:
     lidar_cross_attention_max_delta_logit: float
     lidar_cross_attention_inference_mode: str
     frozen_params: list[str]
-    lidar_loss_weight: float
-    lidar_final_loss_weight: float
     lidar_gaussian_gate_kernel: int
     lidar_lambda_surface: float
     lidar_lambda_free: float
@@ -148,14 +152,16 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
             
             use_lidar_bias=cfg.use_lidar_bias,
-            use_lidar_coarse_loss=cfg.use_lidar_coarse_loss,
-            use_lidar_refine_loss=cfg.use_lidar_refine_loss,
             use_lidar_gaussian_adapter=cfg.use_lidar_gaussian_adapter,
             lidar_gaussian_edit_xy=cfg.lidar_gaussian_edit_xy,
             lidar_gaussian_edit_scale=cfg.lidar_gaussian_edit_scale,
             lidar_gaussian_edit_rotation=cfg.lidar_gaussian_edit_rotation,
             lidar_gaussian_edit_sh_dc=cfg.lidar_gaussian_edit_sh_dc,
             lidar_gaussian_edit_sh_rest=cfg.lidar_gaussian_edit_sh_rest,
+            lidar_gaussian_edit_opacity=cfg.lidar_gaussian_edit_opacity,
+            lidar_gaussian_opacity_max_delta_logit=(
+                cfg.lidar_gaussian_opacity_max_delta_logit
+            ),
             use_lidar_cross_attention=cfg.use_lidar_cross_attention,
             lidar_cross_attention_dim=cfg.lidar_cross_attention_dim,
             lidar_cross_attention_heads=cfg.lidar_cross_attention_heads,
@@ -173,7 +179,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             lidar_temperature=cfg.lidar_temperature,
             lidar_gaussian_gate_kernel=cfg.lidar_gaussian_gate_kernel,
         )
-
         for frozen_prefix in cfg.frozen_params:
             matched_parameters = []
             for name, param in self.named_parameters():
@@ -248,8 +253,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             depths,
             densities,
             raw_gaussians,
-            lidar_coarse_loss,
-            lidar_refine_loss,
+            raw_gaussians_base,
         ) = self.depth_predictor(
             in_feats,
             context["intrinsics"],
@@ -307,6 +311,75 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             ),
             (h, w),
         )
+        opacity_logit_residual = getattr(
+            self.depth_predictor,
+            "lidar_gaussian_opacity_logit_residual",
+            None,
+        )
+        if opacity_logit_residual is not None:
+            base_opacity = gaussians.opacities.clamp(1e-6, 1.0 - 1e-6)
+            corrected_opacity = torch.sigmoid(
+                torch.logit(base_opacity)
+                + opacity_logit_residual.unsqueeze(-1)
+            )
+            gaussians.opacities = corrected_opacity
+
+        # Adapter-loss baseline: keep the corrected depths and densities, but
+        # remove the Gaussian adapter residual itself.
+        base_gaussians = None
+        if self.cfg.use_lidar_gaussian_adapter_loss:
+            with torch.no_grad():
+                base_raw = rearrange(
+                    raw_gaussians_base,
+                    "... (srf c) -> ... srf c",
+                    srf=self.cfg.num_surfaces,
+                )
+                base_xy_ray, _ = sample_image_grid((h, w), device)
+                base_xy_ray = rearrange(base_xy_ray, "h w xy -> (h w) () xy")
+                base_offset_xy = base_raw[..., :2].sigmoid()
+                base_xy_ray = (
+                    base_xy_ray
+                    + (base_offset_xy - 0.5) * pixel_size
+                )
+                base_homogeneous_xy = torch.cat(
+                    (
+                        base_xy_ray,
+                        torch.ones_like(base_xy_ray[..., :1]),
+                    ),
+                    dim=-1,
+                )
+                base_camera_rays = torch.linalg.solve(
+                    rearrange(
+                        context["intrinsics"],
+                        "b v i j -> b v () () i j",
+                    ),
+                    base_homogeneous_xy.unsqueeze(-1),
+                ).squeeze(-1)
+                base_gaussian_depths = (
+                    depths.detach()
+                    * base_camera_rays.norm(dim=-1, keepdim=True)
+                )
+                base_gaussians = self.gaussian_adapter.forward(
+                    rearrange(
+                        context["extrinsics"],
+                        "b v i j -> b v () () () i j",
+                    ),
+                    rearrange(
+                        context["intrinsics"],
+                        "b v i j -> b v () () () i j",
+                    ),
+                    rearrange(
+                        base_xy_ray,
+                        "b v r srf xy -> b v r srf () xy",
+                    ),
+                    base_gaussian_depths,
+                    self.map_pdf_to_opacity(densities.detach(), global_step) / gpp,
+                    rearrange(
+                        base_raw[..., 2:],
+                        "b v r srf c -> b v r srf () c",
+                    ),
+                    (h, w),
+                )
 
         # Dump visualizations if needed.
         if visualization_dump is not None:
@@ -341,9 +414,25 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 "b v r srf spp -> b (v r srf spp)",
             ),
         )
-        output_gaussians.lidar_coarse_loss = lidar_coarse_loss
-        output_gaussians.lidar_refine_loss = lidar_refine_loss
-
+        if base_gaussians is not None:
+            output_gaussians.lidar_base_gaussians = Gaussians(
+                rearrange(
+                    base_gaussians.means,
+                    "b v r srf spp xyz -> b (v r srf spp) xyz",
+                ),
+                rearrange(
+                    base_gaussians.covariances,
+                    "b v r srf spp i j -> b (v r srf spp) i j",
+                ),
+                rearrange(
+                    base_gaussians.harmonics,
+                    "b v r srf spp c d_sh -> b (v r srf spp) c d_sh",
+                ),
+                rearrange(
+                    opacity_multiplier * base_gaussians.opacities,
+                    "b v r srf spp -> b (v r srf spp)",
+                ),
+            )
         return output_gaussians
 
     def get_data_shim(self) -> DataShim:

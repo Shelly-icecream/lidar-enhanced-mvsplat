@@ -39,6 +39,7 @@ from ..visualization import layout
 from ..visualization.validation_in_3d import render_cameras, render_projections
 from .decoder.decoder import Decoder, DepthRenderingMode
 from .encoder import Encoder
+from .types import Gaussians
 from .encoder.visualization.encoder_visualizer import EncoderVisualizer
 
 
@@ -56,6 +57,7 @@ class TestCfg:
     compute_scores: bool
     save_image: bool
     save_video: bool
+    save_lidar_alpha_diagnostics: bool
     eval_time_skip_steps: int
 
 
@@ -185,6 +187,113 @@ class ModelWrapper(LightningModule):
         )
 
 
+    def _lidar_gaussian_adapter_losses(
+        self,
+        edited_output,
+        edited_gaussians: Gaussians,
+        batch: BatchedExample,
+        image_shape: tuple[int, int],
+    ) -> dict[str, Tensor]:
+        """Compute losses only where selected base LiDAR Gaussians contribute."""
+        base_gaussians = getattr(edited_gaussians, "lidar_base_gaussians", None)
+        context_mask = batch["context"].get("lidar_mask")
+        if base_gaussians is None or context_mask is None:
+            raise RuntimeError(
+                "LiDAR Gaussian adapter loss requires base Gaussians and a context LiDAR mask."
+            )
+
+        b, context_views, _, height, width = context_mask.shape
+        num_context_pixels = context_views * height * width
+        num_gaussians = base_gaussians.means.shape[1]
+        if num_context_pixels == 0 or num_gaussians % num_context_pixels != 0:
+            raise ValueError(
+                "Cannot map LiDAR context pixels to flattened Gaussians: "
+                f"num_gaussians={num_gaussians}, "
+                f"context_shape={(context_views, height, width)}."
+            )
+        gaussians_per_pixel = num_gaussians // num_context_pixels
+        selected = rearrange(
+            context_mask > 0.5,
+            "b v 1 h w -> b (v h w)",
+        ).repeat_interleave(gaussians_per_pixel, dim=1)
+        selected_base_gaussians = Gaussians(
+            means=base_gaussians.means,
+            covariances=base_gaussians.covariances,
+            harmonics=base_gaussians.harmonics,
+            opacities=base_gaussians.opacities * selected.to(
+                base_gaussians.opacities.dtype
+            ),
+        )
+
+        render_args = (
+            batch["target"]["extrinsics"],
+            batch["target"]["intrinsics"],
+            batch["target"]["near"],
+            batch["target"]["far"],
+            image_shape,
+        )
+        with torch.no_grad():
+            base_output = self.decoder.forward(
+                base_gaussians,
+                *render_args,
+                depth_mode=self.train_cfg.depth_mode,
+            )
+            influence = self.decoder.render_alpha(
+                selected_base_gaussians,
+                *render_args,
+            ).unsqueeze(2)
+            base_alpha = self.decoder.render_alpha(
+                base_gaussians,
+                *render_args,
+            ).unsqueeze(2)
+        edited_alpha = self.decoder.render_alpha(
+            edited_gaussians,
+            *render_args,
+        ).unsqueeze(2)
+
+        target = batch["target"]["image"]
+        valid = torch.ones_like(target[:, :, :1])
+        dynamic_mask = batch["target"].get("dynamic_mask")
+        if dynamic_mask is not None:
+            valid = valid * (dynamic_mask < 0.5).to(
+                device=valid.device,
+                dtype=valid.dtype,
+            )
+        weight = influence.detach().clamp(0.0, 1.0) * valid
+        pixel_denominator = weight.sum().clamp_min(1.0)
+        rgb_denominator = (pixel_denominator * target.shape[2]).clamp_min(1.0)
+
+        edited_abs_error = (edited_output.color - target).abs()
+        base_abs_error = (base_output.color - target).abs().detach()
+        local_rgb = (edited_abs_error * weight).sum() / rgb_denominator
+        improvement_margin = float(
+            getattr(
+                self.encoder.cfg,
+                "lidar_gaussian_adapter_improvement_margin",
+                0.0,
+            )
+        )
+        improvement = (
+            torch.relu(
+                edited_abs_error.mean(dim=2, keepdim=True)
+                - base_abs_error.mean(dim=2, keepdim=True)
+                + improvement_margin
+            )
+            * weight
+        ).sum() / pixel_denominator
+        alpha_worse = (
+            torch.relu(
+                (1.0 - edited_alpha).abs()
+                - (1.0 - base_alpha).abs().detach()
+            )
+            * weight
+        ).sum() / pixel_denominator
+        return {
+            "lidar_gaussian_local_rgb": local_rgb,
+            "lidar_gaussian_improvement": improvement,
+            "lidar_gaussian_alpha_worse": alpha_worse,
+        }
+
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         _, _, _, h, w = batch["target"]["image"].shape
@@ -198,15 +307,6 @@ class ModelWrapper(LightningModule):
             scene_names=batch["scene"],
         )
 
-        lidar_coarse_loss = getattr(gaussians, "lidar_coarse_loss", None)
-        lidar_parameter_diagnostics = getattr(
-            getattr(self.encoder, "depth_predictor", None),
-            "lidar_parameter_diagnostics",
-            {},
-        )
-        for name, value in lidar_parameter_diagnostics.items():
-            self.log(f"lidar_bias/{name}", value)
-        lidar_refine_loss = getattr(gaussians, "lidar_refine_loss", None)
         output = self.decoder.forward(
             gaussians,
             batch["target"]["extrinsics"],
@@ -219,35 +319,99 @@ class ModelWrapper(LightningModule):
         target_gt = batch["target"]["image"]
 
         # Compute metrics.
-        psnr_probabilistic = compute_psnr(
-            rearrange(target_gt, "b v c h w -> (b v) c h w"),
-            rearrange(output.color, "b v c h w -> (b v) c h w"),
+        use_adapter_loss = bool(
+            getattr(
+                self.encoder.cfg,
+                "use_lidar_gaussian_adapter_loss",
+                False,
+            )
         )
-        self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
+        if not use_adapter_loss:
+            psnr_probabilistic = compute_psnr(
+                rearrange(target_gt, "b v c h w -> (b v) c h w"),
+                rearrange(output.color, "b v c h w -> (b v) c h w"),
+            )
+            self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
 
         # Compute and log loss.
         total_loss = 0
-        for loss_fn in self.losses:
-            loss = loss_fn.forward(output, batch, gaussians, self.global_step)
-            self.log(f"loss/{loss_fn.name}", loss)
-            for name, value in getattr(loss_fn, "diagnostics", {}).items():
-                self.log(f"loss/{name}", value)
-            total_loss = total_loss + loss
-        cfg = get_cfg()
-        use_lidar_coarse_loss = cfg.model.encoder.use_lidar_coarse_loss
-        use_lidar_refine_loss = cfg.model.encoder.use_lidar_refine_loss
-        lambda_lidar = cfg.model.encoder.lidar_loss_weight
-        lambda_lidar_final = cfg.model.encoder.lidar_final_loss_weight
-
-        if use_lidar_coarse_loss and lidar_coarse_loss is not None and lambda_lidar > 0:
-            total_loss = total_loss + lambda_lidar * lidar_coarse_loss
-            self.log("loss/lidar_coarse", lidar_coarse_loss)
-            self.log("loss/lidar_coarse_weighted", lambda_lidar * lidar_coarse_loss)
-
-        if use_lidar_refine_loss and lidar_refine_loss is not None and lambda_lidar_final > 0:
-            total_loss = total_loss + lambda_lidar_final * lidar_refine_loss
-            self.log("loss/lidar_refine", lidar_refine_loss)
-            self.log("loss/lidar_refine_weighted", lambda_lidar_final * lidar_refine_loss)
+        if not use_adapter_loss:
+            for loss_fn in self.losses:
+                loss = loss_fn.forward(output, batch, gaussians, self.global_step)
+                self.log(f"loss/{loss_fn.name}", loss)
+                for name, value in getattr(loss_fn, "diagnostics", {}).items():
+                    self.log(f"loss/{name}", value)
+                total_loss = total_loss + loss
+        if use_adapter_loss:
+            adapter_losses = self._lidar_gaussian_adapter_losses(
+                output,
+                gaussians,
+                batch,
+                (h, w),
+            )
+            adapter_loss_weights = {
+                "lidar_gaussian_local_rgb": float(
+                    self.encoder.cfg.lidar_gaussian_adapter_local_rgb_weight
+                ),
+                "lidar_gaussian_improvement": float(
+                    self.encoder.cfg.lidar_gaussian_adapter_improvement_weight
+                ),
+                "lidar_gaussian_alpha_worse": float(
+                    self.encoder.cfg.lidar_gaussian_adapter_alpha_weight
+                ),
+            }
+            for name, loss in adapter_losses.items():
+                total_loss = total_loss + adapter_loss_weights[name] * loss
+                self.log(f"loss/{name}", loss)
+        context_render_weight = float(
+            getattr(
+                self.encoder.cfg,
+                "lidar_gaussian_context_render_weight",
+                0.0,
+            )
+        )
+        context_lidar_mask = batch["context"].get("lidar_mask")
+        if context_render_weight > 0.0 and context_lidar_mask is not None:
+            context_height, context_width = batch["context"]["image"].shape[-2:]
+            context_output = self.decoder.forward(
+                gaussians,
+                batch["context"]["extrinsics"],
+                batch["context"]["intrinsics"],
+                batch["context"]["near"],
+                batch["context"]["far"],
+                (context_height, context_width),
+                depth_mode=None,
+            )
+            static_lidar_mask = (context_lidar_mask > 0.5).to(
+                device=context_output.color.device,
+                dtype=context_output.color.dtype,
+            )
+            context_dynamic_mask = batch["context"].get("dynamic_mask")
+            if context_dynamic_mask is not None:
+                static_lidar_mask = static_lidar_mask * (
+                    context_dynamic_mask < 0.5
+                ).to(
+                    device=context_output.color.device,
+                    dtype=context_output.color.dtype,
+                )
+            context_render_loss = (
+                (context_output.color - batch["context"]["image"])
+                .abs()
+                .mul(static_lidar_mask)
+                .sum()
+                / (
+                    static_lidar_mask.sum()
+                    * context_output.color.shape[2]
+                ).clamp_min(1.0)
+            )
+            weighted_context_render_loss = (
+                context_render_weight * context_render_loss
+            )
+            total_loss = total_loss + weighted_context_render_loss
+            self.log(
+                "loss/lidar_gaussian_context_render",
+                context_render_loss,
+            )
         self.log("loss/total", total_loss)
 
         if (
@@ -262,8 +426,6 @@ class ModelWrapper(LightningModule):
                 f"{batch['context']['far'].detach().cpu().numpy().mean()}]; "
                 f"loss = {total_loss:.6f}"
             )
-        self.log("info/near", batch["context"]["near"].detach().cpu().numpy().mean())
-        self.log("info/far", batch["context"]["far"].detach().cpu().numpy().mean())
         self.log("info/global_step", self.global_step)  # hack for ckpt monitor
 
         # Tell the data loader processes about the current step.
@@ -356,6 +518,98 @@ class ModelWrapper(LightningModule):
         images_prob = output.color[0]
         rgb_gt = batch["target"]["image"][0]
 
+        lidar_alpha_diagnostics = None
+        if self.test_cfg.save_lidar_alpha_diagnostics:
+            depth_predictor = getattr(self.encoder, "depth_predictor", None)
+            if depth_predictor is None:
+                raise RuntimeError("LiDAR alpha diagnostics require a depth predictor.")
+            original_use_lidar_bias = depth_predictor.use_lidar_bias
+            original_use_gaussian_adapter = (
+                depth_predictor.use_lidar_gaussian_adapter
+            )
+            try:
+                # Isolate the analytic depth bias: disable Gaussian parameter
+                # edits in both branches and vary only use_lidar_bias.
+                depth_predictor.use_lidar_gaussian_adapter = False
+                depth_predictor.use_lidar_bias = False
+                visual_gaussians = self.encoder(
+                    batch["context"],
+                    self.global_step,
+                    deterministic=True,
+                )
+                depth_predictor.use_lidar_bias = True
+                biased_gaussians = self.encoder(
+                    batch["context"],
+                    self.global_step,
+                    deterministic=True,
+                )
+            finally:
+                depth_predictor.use_lidar_bias = original_use_lidar_bias
+                depth_predictor.use_lidar_gaussian_adapter = (
+                    original_use_gaussian_adapter
+                )
+
+            visual_rgb = self.decoder.forward(
+                visual_gaussians,
+                batch["target"]["extrinsics"],
+                batch["target"]["intrinsics"],
+                batch["target"]["near"],
+                batch["target"]["far"],
+                (h, w),
+                depth_mode=None,
+            ).color
+            biased_rgb = self.decoder.forward(
+                biased_gaussians,
+                batch["target"]["extrinsics"],
+                batch["target"]["intrinsics"],
+                batch["target"]["near"],
+                batch["target"]["far"],
+                (h, w),
+                depth_mode=None,
+            ).color
+            visual_alpha = self.decoder.render_alpha(
+                visual_gaussians,
+                batch["target"]["extrinsics"],
+                batch["target"]["intrinsics"],
+                batch["target"]["near"],
+                batch["target"]["far"],
+                (h, w),
+            )
+            biased_alpha = self.decoder.render_alpha(
+                biased_gaussians,
+                batch["target"]["extrinsics"],
+                batch["target"]["intrinsics"],
+                batch["target"]["near"],
+                batch["target"]["far"],
+                (h, w),
+            )
+            visual_depth = self.decoder.render_depth(
+                visual_gaussians,
+                batch["target"]["extrinsics"],
+                batch["target"]["intrinsics"],
+                batch["target"]["near"],
+                batch["target"]["far"],
+                (h, w),
+                mode="relative_disparity",
+            )
+            biased_depth = self.decoder.render_depth(
+                biased_gaussians,
+                batch["target"]["extrinsics"],
+                batch["target"]["intrinsics"],
+                batch["target"]["near"],
+                batch["target"]["far"],
+                (h, w),
+                mode="relative_disparity",
+            )
+            lidar_alpha_diagnostics = {
+                "visual_rgb": visual_rgb[0],
+                "biased_rgb": biased_rgb[0],
+                "visual_alpha": visual_alpha[0],
+                "biased_alpha": biased_alpha[0],
+                "visual_depth": visual_depth[0],
+                "biased_depth": biased_depth[0],
+            }
+
         # Save images.
         if self.test_cfg.save_image:
             expected_image_shape = (176, 320)
@@ -374,6 +628,50 @@ class ModelWrapper(LightningModule):
                 filename = f"{index.item():0>6}.png"
                 save_image(target, path / scene / "target_processed" / filename)
                 save_image(prediction, path / scene / "prediction" / filename)
+                if lidar_alpha_diagnostics is not None:
+                    target_position = (
+                        batch["target"]["index"][0] == index
+                    ).nonzero(as_tuple=False)[0, 0]
+                    diag_dir = path / scene / "lidar_alpha_diagnostics"
+                    visual_rgb = lidar_alpha_diagnostics["visual_rgb"][target_position]
+                    biased_rgb = lidar_alpha_diagnostics["biased_rgb"][target_position]
+                    visual_alpha = lidar_alpha_diagnostics["visual_alpha"][target_position]
+                    biased_alpha = lidar_alpha_diagnostics["biased_alpha"][target_position]
+                    visual_depth = lidar_alpha_diagnostics["visual_depth"][target_position]
+                    biased_depth = lidar_alpha_diagnostics["biased_depth"][target_position]
+                    save_image(visual_rgb, diag_dir / f"{index.item():0>6}_rgb_visual.png")
+                    save_image(biased_rgb, diag_dir / f"{index.item():0>6}_rgb_bias.png")
+                    save_image(visual_alpha, diag_dir / f"{index.item():0>6}_alpha_visual.png")
+                    save_image(biased_alpha, diag_dir / f"{index.item():0>6}_alpha_bias.png")
+                    save_image(visual_depth, diag_dir / f"{index.item():0>6}_depth_visual.png")
+                    save_image(biased_depth, diag_dir / f"{index.item():0>6}_depth_bias.png")
+                    save_image(
+                        (biased_alpha - visual_alpha).abs(),
+                        diag_dir / f"{index.item():0>6}_alpha_abs_diff.png",
+                    )
+                    save_image(
+                        (biased_depth - visual_depth).abs(),
+                        diag_dir / f"{index.item():0>6}_depth_abs_diff.png",
+                    )
+
+                    darkened = (
+                        biased_rgb.mean(dim=0)
+                        < visual_rgb.mean(dim=0) - 0.05
+                    )
+                    if darkened.any():
+                        print(
+                            "[LiDAR Alpha Diagnostics] "
+                            f"scene={scene}, target={index.item()}, "
+                            f"darkened_pixels={int(darkened.sum().item())}, "
+                            f"alpha_visual={visual_alpha[darkened].mean().item():.4f}, "
+                            f"alpha_bias={biased_alpha[darkened].mean().item():.4f}, "
+                            f"alpha_bias_gt_0.9="
+                            f"{(biased_alpha[darkened] > 0.9).float().mean().item():.4f}, "
+                            f"alpha_bias_lt_0.1="
+                            f"{(biased_alpha[darkened] < 0.1).float().mean().item():.4f}, "
+                            f"depth_abs_diff="
+                            f"{(biased_depth[darkened] - visual_depth[darkened]).abs().mean().item():.4f}"
+                        )
 
         # save video
         if self.test_cfg.save_video:

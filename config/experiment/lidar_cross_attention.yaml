@@ -38,8 +38,6 @@ model:
     lidar_cross_attention_heads: 4
     lidar_cross_attention_radius: 1
     lidar_cross_attention_max_delta_logit: 10.0
-    use_lidar_coarse_loss: true
-    use_lidar_refine_loss: true
     frozen_params: 
       - backbone
       - depth_predictor.corr_refine_net
@@ -50,8 +48,6 @@ model:
       #- depth_predictor.refine_unet
       #- depth_predictor.to_disparity
       #- depth_predictor.to_gaussians
-    lidar_loss_weight: 0.05
-    lidar_final_loss_weight: 0.05
     lidar_lambda_surface: 10.0
     lidar_lambda_free: 2.0
     lidar_sigma_disp: 0.01
@@ -111,10 +107,11 @@ test:
   compute_scores: true
   save_image: true
   save_video: false
+  save_lidar_alpha_diagnostics: false
 
 checkpointing:
   load: checkpoints/kll6000.ckpt   
   resume: false                           
   every_n_train_steps: 200              
   save_top_k: -1                          
-  pretrained_model: null                  
+  pretrained_model: null
