@@ -44,8 +44,6 @@ model:
     unimatch_weights_path: null
 
     use_lidar_bias: false
-    use_lidar_cross_attention: false
-    lidar_cross_attention_inference_mode: "off"
     use_lidar_gaussian_adapter: false
 
     frozen_params:

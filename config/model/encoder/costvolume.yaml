@@ -57,16 +57,27 @@ lidar_gaussian_adapter_improvement_weight: 1.0
 lidar_gaussian_adapter_improvement_margin: 0.0
 lidar_gaussian_adapter_alpha_weight: 0.1
 lidar_gaussian_context_render_weight: 0.0
+use_lidar_gaussian_neighbor_depth_adapter: false
+use_lidar_gaussian_neighbor_depth_loss: false
+lidar_neighbor_depth_radius: 2
+lidar_neighbor_depth_topk: 4
+lidar_neighbor_depth_max_relative_ref_disparity_error: 0.05
+lidar_neighbor_depth_reference_bound_margin: 0.02
+lidar_neighbor_depth_min_shallow_cosine: 0.85
+lidar_neighbor_depth_min_refine_cosine: 0.9
+lidar_neighbor_depth_max_rgb_difference: 0.12
+lidar_neighbor_depth_max_gate: 0.3
+lidar_neighbor_depth_target_disagreement_scale: 0.2
+lidar_neighbor_depth_local_rgb_weight: 1.0
+lidar_neighbor_depth_improvement_weight: 1.0
+lidar_neighbor_depth_coverage_weight: 0.2
+lidar_neighbor_depth_over_alpha_worse_weight: 0.5
+lidar_neighbor_depth_alpha_tolerance: 0.02
+lidar_neighbor_depth_min_attraction: 0.1
+lidar_neighbor_depth_attraction_weight: 0.2
+lidar_neighbor_depth_diagnostic_every_n_steps: 100
 frozen_params: []
 lidar_gaussian_gate_kernel: 5
-use_lidar_cross_attention: false
-lidar_cross_attention_dim: 128
-lidar_cross_attention_heads: 4
-lidar_cross_attention_radius: 4
-lidar_cross_attention_max_delta_logit: 15.0
-# Inference-only checkpoint override: auto | on | off.
-lidar_cross_attention_inference_mode: auto
-
 # LiDAR visibility prior params
 lidar_lambda_surface: 10.0
 lidar_lambda_free: 2.0

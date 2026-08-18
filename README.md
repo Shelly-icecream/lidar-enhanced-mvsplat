@@ -6,7 +6,6 @@
 
 - `temporal`：不使用 LiDAR 的 nuScenes 时序基线；
 - `lidar_bias`：固定解析式 LiDAR Bias；
-- `lidar_cross_attention`：LiDAR cross-attention 实验分支。
 
 LiDAR Bias 由 Temperature scaling、Surface attraction prior 和 Free-space suppression prior 组成。
 
@@ -106,8 +105,6 @@ python -m src.main \
 model:
   encoder:
     use_lidar_bias: true
-    use_lidar_cross_attention: false
-    lidar_cross_attention_inference_mode: "off"
     use_lidar_coarse_loss: false
     use_lidar_refine_loss: true
     lidar_loss_weight: 0.0
@@ -162,16 +159,6 @@ wandb login
 ```
 
 ## 9. 常见问题
-
-### `on` 被解析成布尔值
-
-YAML 中的 `on/off` 可能被解析成布尔值，必须加引号：
-
-```yaml
-lidar_cross_attention_inference_mode: "off"
-```
-
-LiDAR Bias 实验应保持 Cross-Attention 关闭。
 
 ### 找不到数据或 checkpoint
 

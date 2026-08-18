@@ -35,12 +35,29 @@ trainer:
 model:
   encoder:
     use_lidar_bias: true
-    use_lidar_cross_attention: false
-    lidar_cross_attention_inference_mode: "off"
-    lidar_cross_attention_dim: 128
-    lidar_cross_attention_heads: 4
-    use_lidar_gaussian_adapter: true
 
+    use_lidar_gaussian_neighbor_depth_adapter: true
+    use_lidar_gaussian_neighbor_depth_loss: true
+    lidar_neighbor_depth_radius: 4
+    lidar_neighbor_depth_topk: 20
+    lidar_neighbor_depth_max_relative_ref_disparity_error: 0.05
+    lidar_neighbor_depth_reference_bound_margin: 0.02
+    lidar_neighbor_depth_min_shallow_cosine: 0.85
+    lidar_neighbor_depth_min_refine_cosine: 0.9
+    lidar_neighbor_depth_max_rgb_difference: 0.12
+    lidar_neighbor_depth_max_gate: 1.0
+    lidar_neighbor_depth_target_disagreement_scale: 0.2
+    lidar_neighbor_depth_local_rgb_weight: 0.1
+    lidar_neighbor_depth_improvement_weight: 1.0
+    lidar_neighbor_depth_coverage_weight: 1.0
+    lidar_neighbor_depth_over_alpha_worse_weight: 0.5
+    lidar_neighbor_depth_alpha_tolerance: 0.02
+    lidar_neighbor_depth_min_attraction: 0.4
+    lidar_neighbor_depth_attraction_weight: 1.0
+    lidar_neighbor_depth_diagnostic_every_n_steps: 100
+
+    use_lidar_gaussian_adapter: false
+    use_lidar_gaussian_adapter_loss: false
     lidar_gaussian_edit_xy: false
     lidar_gaussian_edit_scale: false
     lidar_gaussian_edit_rotation: false
@@ -48,12 +65,12 @@ model:
     lidar_gaussian_edit_sh_rest: false
     lidar_gaussian_edit_opacity: true
     lidar_gaussian_opacity_max_delta_logit: 1.0
-    use_lidar_gaussian_adapter_loss: true
     lidar_gaussian_adapter_local_rgb_weight: 1.0
     lidar_gaussian_adapter_improvement_weight: 1.0
     lidar_gaussian_adapter_improvement_margin: 0.0
     lidar_gaussian_adapter_alpha_weight: 0.1
-    lidar_gaussian_context_render_weight: 0.25
+    lidar_gaussian_context_render_weight: 0.0
+
     frozen_params: 
       - backbone
       - depth_predictor.corr_refine_net
@@ -123,7 +140,7 @@ test:
   save_lidar_alpha_diagnostics: false
 
 checkpointing:
-  load: checkpoints/re10k.ckpt   
+  load: checkpoints/re10k.ckpt
   resume: false                           
   every_n_train_steps: 200              
   save_top_k: -1                          

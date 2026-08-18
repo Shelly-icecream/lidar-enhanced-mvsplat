@@ -32,8 +32,6 @@ trainer:
 model:
   encoder:
     use_lidar_bias: false
-    use_lidar_cross_attention: false
-    lidar_cross_attention_inference_mode: "off"
     frozen_params: []
     lidar_lambda_surface: 10.0
     lidar_lambda_free: 2.0

@@ -154,295 +154,6 @@ class LidarGaussianCrossAttention(nn.Module):
                 output[batch_index].flatten(1)[:, chunk_indices] = chunk_output.transpose(0, 1)
         return output
 
-
-class LidarTokenCrossAttention(nn.Module):
-    """Predict local LiDAR-conditioned residuals for visual depth logits."""
-
-    def __init__(
-        self,
-        num_depth_candidates: int,
-        attention_dim: int,
-        num_heads: int,
-        radius: int,
-        max_delta_logit: float,
-    ) -> None:
-        super().__init__()
-        if attention_dim % num_heads != 0:
-            raise ValueError(
-                "LiDAR attention_dim must be divisible by num_heads."
-            )
-        if radius < 0:
-            raise ValueError("LiDAR cross-attention radius must be non-negative.")
-        if max_delta_logit <= 0:
-            raise ValueError("LiDAR max delta logit must be positive.")
-
-        self.num_depth_candidates = num_depth_candidates
-        self.attention_dim = attention_dim
-        self.num_heads = num_heads
-        self.head_dim = attention_dim // num_heads
-        self.radius = radius
-        self.kernel_size = 2 * radius + 1
-        self.max_delta_logit = max_delta_logit
-
-        # Raw normalized xy plus sin/cos at pi and 2*pi for each axis.
-        position_dim = 10
-        lidar_attribute_dim = 5
-        self.query_norm = nn.LayerNorm(num_depth_candidates)
-        self.query_proj = nn.Linear(num_depth_candidates, attention_dim)
-        self.query_position_proj = nn.Linear(position_dim, attention_dim)
-        self.query_stat_proj = nn.Linear(2, attention_dim)
-        self.lidar_attribute_encoder = nn.Sequential(
-            nn.Linear(lidar_attribute_dim, attention_dim),
-            nn.SiLU(),
-            nn.Linear(attention_dim, attention_dim),
-        )
-        self.lidar_position_proj = nn.Linear(position_dim, attention_dim)
-        self.key_proj = nn.Linear(attention_dim, attention_dim)
-        self.value_proj = nn.Linear(attention_dim, attention_dim)
-        self.relative_position_bias = nn.Linear(2, num_heads, bias=False)
-        self.delta_head = nn.Sequential(
-            nn.Linear(attention_dim, attention_dim, bias=False),
-            nn.GELU(),
-            nn.Linear(
-                attention_dim,
-                num_depth_candidates,
-                bias=False,
-            ),
-        )
-
-        # The new branch starts as an exact identity for pretrained checkpoints.
-        nn.init.zeros_(self.delta_head[-1].weight)
-
-
-    @staticmethod
-    def _position_encoding(
-        xy: torch.Tensor,
-    ) -> torch.Tensor:
-        x, y = xy.unbind(dim=-1)
-        fourier = torch.stack(
-            (
-                torch.sin(math.pi * x),
-                torch.cos(math.pi * x),
-                torch.sin(2.0 * math.pi * x),
-                torch.cos(2.0 * math.pi * x),
-                torch.sin(math.pi * y),
-                torch.cos(math.pi * y),
-                torch.sin(2.0 * math.pi * y),
-                torch.cos(2.0 * math.pi * y),
-            ),
-            dim=-1,
-        )
-        return torch.cat((xy, fourier), dim=-1)
-
-    @staticmethod
-    def _normalized_grid(
-        height: int,
-        width: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        y = torch.linspace(-1.0, 1.0, height, device=device, dtype=dtype)
-        x = torch.linspace(-1.0, 1.0, width, device=device, dtype=dtype)
-        yy, xx = torch.meshgrid(y, x, indexing="ij")
-        return torch.stack((xx, yy), dim=-1).reshape(height * width, 2)
-
-    def forward(
-        self,
-        visual_logits: torch.Tensor,
-        lidar_disp: torch.Tensor,
-        lidar_mask: torch.Tensor,
-        visual_disp: torch.Tensor,
-        visual_entropy: torch.Tensor,
-        lidar_density: torch.Tensor,
-        disp_min: torch.Tensor,
-        disp_max: torch.Tensor,
-    ) -> torch.Tensor:
-        vb, candidates, height, width = visual_logits.shape
-        if candidates != self.num_depth_candidates:
-            raise ValueError(
-                "Visual depth-logit channels do not match num_depth_candidates."
-            )
-        if lidar_mask.shape[-2:] != (height, width):
-            raise ValueError(
-                "LiDAR token grid must match the visual depth-logit grid."
-            )
-
-        valid = lidar_mask[:, 0] > 0.5
-        has_lidar = valid.flatten(1).any(dim=1)
-        if not valid.any():
-            return visual_logits
-
-        grid = self._normalized_grid(
-            height,
-            width,
-            visual_logits.device,
-            visual_logits.dtype,
-        )
-        position_encoding = self._position_encoding(grid)
-        logit_tokens = visual_logits.flatten(2).transpose(1, 2)
-
-        disp_scale = (disp_max - disp_min).clamp_min(1e-6)
-        lidar_disp_norm = (lidar_disp - disp_min) / disp_scale
-        visual_disp_norm = (visual_disp - disp_min) / disp_scale
-        residual_norm = (lidar_disp - visual_disp) / disp_scale
-
-        # Q_i = E_logit(L_i) + E_pos(x_i, y_i)
-        #       + E_stat(expected_disparity_i, entropy_i).
-        query_stats = torch.cat(
-            (visual_disp_norm, visual_entropy),
-            dim=1,
-        ).flatten(2).transpose(1, 2)
-        query_logit = self.query_proj(self.query_norm(logit_tokens))
-        query_position = self.query_position_proj(position_encoding)[None]
-        query_stats_encoded = self.query_stat_proj(query_stats)
-        query = query_logit + query_position + query_stats_encoded
-        with torch.no_grad():
-            logit_norm = query_logit.norm(dim=-1).mean()
-            position_norm = query_position.norm(dim=-1).mean()
-            stat_norm = query_stats_encoded.norm(dim=-1).mean()
-            combined_norm = query.norm(dim=-1).mean()
-            visual_logits_detached = visual_logits.detach()
-            visual_candidate_std = visual_logits_detached.std(
-                dim=1,
-                unbiased=False,
-            ).mean()
-            print(
-                "[LiDAR Attention Query Diagnostics] "
-                f"E_logit_norm={logit_norm.item():.6f}, "
-                f"E_pos_norm={position_norm.item():.6f}, "
-                f"E_stat_norm={stat_norm.item():.6f}, "
-                f"Q_norm={combined_norm.item():.6f}, "
-                f"visual_logits_min={visual_logits_detached.min().item():.6f}, "
-                f"visual_logits_mean={visual_logits_detached.mean().item():.6f}, "
-                f"visual_logits_max={visual_logits_detached.max().item():.6f}, "
-                f"visual_logits_std={visual_logits_detached.std(unbiased=False).item():.6f}, "
-                f"visual_candidate_std_mean={visual_candidate_std.item():.6f}, "
-                f"entropy_min={visual_entropy.min().item():.6f}, "
-                f"entropy_mean={visual_entropy.mean().item():.6f}, "
-                f"entropy_max={visual_entropy.max().item():.6f}"
-            )
-
-        lidar_attributes = torch.cat(
-            (
-                lidar_disp_norm,
-                visual_disp_norm,
-                residual_norm,
-                visual_entropy,
-                lidar_density,
-            ),
-            dim=1,
-        )
-        window_area = self.kernel_size**2
-        num_pixels = height * width
-        local_attributes = F.unfold(
-            lidar_attributes,
-            kernel_size=self.kernel_size,
-            padding=self.radius,
-        ).reshape(vb, 5, window_area, num_pixels).permute(0, 3, 2, 1)
-        local_valid = F.unfold(
-            valid[:, None].to(dtype=visual_logits.dtype),
-            kernel_size=self.kernel_size,
-            padding=self.radius,
-        ).transpose(1, 2) > 0.5
-
-        position_map = position_encoding.transpose(0, 1).reshape(
-            1,
-            position_encoding.shape[-1],
-            height,
-            width,
-        ).expand(vb, -1, -1, -1)
-        local_positions = F.unfold(
-            position_map,
-            kernel_size=self.kernel_size,
-            padding=self.radius,
-        ).reshape(
-            vb,
-            position_encoding.shape[-1],
-            window_area,
-            num_pixels,
-        ).permute(0, 3, 2, 1)
-
-        lidar_tokens = self.lidar_attribute_encoder(local_attributes)
-        lidar_tokens = lidar_tokens + self.lidar_position_proj(local_positions)
-        key = self.key_proj(lidar_tokens).reshape(
-            vb, num_pixels, window_area, self.num_heads, self.head_dim
-        )
-        value = self.value_proj(lidar_tokens).reshape(
-            vb, num_pixels, window_area, self.num_heads, self.head_dim
-        )
-        query_heads = query.reshape(
-            vb, num_pixels, self.num_heads, self.head_dim
-        )
-
-
-        offsets = torch.arange(
-            -self.radius,
-            self.radius + 1,
-            device=visual_logits.device,
-            dtype=visual_logits.dtype,
-        )
-        offset_y, offset_x = torch.meshgrid(offsets, offsets, indexing="ij")
-        relative_xy = torch.stack((offset_x, offset_y), dim=-1).reshape(
-            window_area, 2
-        ) / max(self.radius, 1)
-        relative_bias = self.relative_position_bias(relative_xy).transpose(0, 1)
-
-        attention_scores = torch.einsum(
-            "bnhd,bnkhd->bnhk",
-            query_heads,
-            key,
-        ) / math.sqrt(self.head_dim)
-        attention_scores = attention_scores + relative_bias[None, None, :, :]
-        attention_scores = attention_scores.masked_fill(
-            ~local_valid[:, :, None, :],
-            -1e4,
-        )
-        attention_weights = F.softmax(attention_scores, dim=-1)
-        attention_weights = attention_weights * local_valid[:, :, None, :].to(
-            dtype=attention_weights.dtype
-        )
-        attention_weights = attention_weights / attention_weights.sum(
-            dim=-1,
-            keepdim=True,
-        ).clamp_min(1e-8)
-        attended = torch.einsum(
-            "bnhk,bnkhd->bnhd",
-            attention_weights,
-            value,
-        ).reshape(vb, num_pixels, self.attention_dim)
-
-        delta_logits_raw = self.delta_head(attended)
-        delta_logits_centered = (
-            delta_logits_raw - delta_logits_raw.mean(dim=-1, keepdim=True)
-        )
-        delta_logits = self.max_delta_logit * torch.tanh(delta_logits_centered)
-        has_local_lidar = local_valid.any(dim=-1, keepdim=True)
-        delta_logits = delta_logits * has_local_lidar.to(delta_logits.dtype)
-        with torch.no_grad():
-            active_delta = delta_logits[has_local_lidar.expand_as(delta_logits)]
-            active_centered = delta_logits_centered[
-                has_local_lidar.expand_as(delta_logits_centered)
-            ]
-            if active_delta.numel() > 0:
-                saturation_ratio = (
-                    active_delta.abs() >= 0.9 * self.max_delta_logit
-                ).float().mean()
-                print(
-                    "[LiDAR Attention Delta Diagnostics] "
-                    f"pre_tanh_min={active_centered.min().item():.6f}, "
-                    f"pre_tanh_mean={active_centered.mean().item():.6f}, "
-                    f"pre_tanh_max={active_centered.max().item():.6f}, "
-                    f"delta_min={active_delta.min().item():.6f}, "
-                    f"delta_abs_mean={active_delta.abs().mean().item():.6f}, "
-                    f"delta_max={active_delta.max().item():.6f}, "
-                    f"max_delta_logit={self.max_delta_logit:.6f}, "
-                    f"saturation_ratio={saturation_ratio.item():.6f}"
-                )
-        delta_logits = delta_logits.transpose(1, 2).reshape(
-            vb, candidates, height, width
-        )
-        return visual_logits + delta_logits
-
 def build_lidar_surface_prior(
     disp_candi_curr,
     lidar_disp_low,
@@ -867,20 +578,6 @@ class DepthPredictorMultiView(nn.Module):
     """IMPORTANT: this model is in (v b), NOT (b v), due to some historical issues.
     keep this in mind when performing any operation related to the view dim"""
 
-    def set_lidar_cross_attention_enabled(self, enabled: bool) -> None:
-        self.use_lidar_cross_attention = bool(enabled)
-        if enabled and self.lidar_cross_attention is None:
-            self.lidar_cross_attention = LidarTokenCrossAttention(
-                num_depth_candidates=self.num_depth_candidates,
-                attention_dim=self.lidar_cross_attention_dim,
-                num_heads=self.lidar_cross_attention_heads,
-                radius=self.lidar_cross_attention_radius,
-                max_delta_logit=self.lidar_cross_attention_max_delta_logit,
-            )
-        elif not enabled:
-            self.lidar_cross_attention = None
-
-
     def __init__(
         self,
         feature_channels=128,
@@ -909,12 +606,6 @@ class DepthPredictorMultiView(nn.Module):
         lidar_gaussian_edit_sh_rest=False,
         lidar_gaussian_edit_opacity=False,
         lidar_gaussian_opacity_max_delta_logit=1.0,
-        use_lidar_cross_attention=False,
-        lidar_cross_attention_dim=128,
-        lidar_cross_attention_heads=4,
-        lidar_cross_attention_radius=4,
-        lidar_cross_attention_max_delta_logit=15.0,
-        lidar_cross_attention_inference_mode="auto",
         lidar_lambda_surface=10.0,
         lidar_lambda_free=2.0,
         lidar_sigma_disp=0.12,
@@ -935,6 +626,8 @@ class DepthPredictorMultiView(nn.Module):
         # Table 3: w/o U-Net
         self.wo_cost_volume_refine = wo_cost_volume_refine
         self.use_lidar_bias = use_lidar_bias
+        self.compute_lidar_depth_repair_aux = False
+        self.lidar_depth_repair_aux = None
         self.use_lidar_gaussian_adapter = use_lidar_gaussian_adapter
         self.lidar_gaussian_edit_xy = bool(lidar_gaussian_edit_xy)
         self.lidar_gaussian_edit_scale = bool(lidar_gaussian_edit_scale)
@@ -945,25 +638,6 @@ class DepthPredictorMultiView(nn.Module):
         self.lidar_gaussian_opacity_max_delta_logit = float(
             lidar_gaussian_opacity_max_delta_logit
         )
-        self.use_lidar_cross_attention = use_lidar_cross_attention
-        self.lidar_cross_attention_dim = lidar_cross_attention_dim
-        self.lidar_cross_attention_heads = lidar_cross_attention_heads
-        self.lidar_cross_attention_radius = lidar_cross_attention_radius
-        self.lidar_cross_attention_max_delta_logit = (
-            lidar_cross_attention_max_delta_logit
-        )
-        if lidar_cross_attention_inference_mode not in {"auto", "on", "off"}:
-            raise ValueError(
-                "lidar_cross_attention_inference_mode must be one of "
-                "{'auto', 'on', 'off'}."
-            )
-        self.lidar_cross_attention_inference_mode = (
-            lidar_cross_attention_inference_mode
-        )
-        if self.use_lidar_cross_attention and self.wo_cost_volume_refine:
-            raise ValueError(
-                "LiDAR cross-attention requires cost-volume U-Net refinement."
-            )
         self.lidar_lambda_surface = lidar_lambda_surface
         self.lidar_lambda_free = lidar_lambda_free
         self.lidar_sigma_disp = lidar_sigma_disp
@@ -977,10 +651,6 @@ class DepthPredictorMultiView(nn.Module):
                 "lidar_temperature must be positive, "
                 f"got {self.lidar_temperature}."
             )
-        self.lidar_cross_attention = None
-        if self.use_lidar_cross_attention:
-            self.set_lidar_cross_attention_enabled(True)
-        
         # 用于统计整个测试集上的 LiDAR 三阶段误差
         self.lidar_diag = {
             "num_points": 0,
@@ -989,10 +659,6 @@ class DepthPredictorMultiView(nn.Module):
             "refine_delta_sum": 0.0,
             "refine_improve_count": 0,
             "refine_worsen_count": 0,
-            "final_depth_num_points": 0,
-            "final_depth_abs_error_sum": 0.0,
-            "final_depth_abs_rel_sum": 0.0,
-            "final_depth_sq_error_sum": 0.0,
         }
 
         # Cost volume refinement: 2D U-Net
@@ -1167,6 +833,7 @@ class DepthPredictorMultiView(nn.Module):
         """IMPORTANT: this model is in (v b), NOT (b v), due to some historical issues.
         keep this in mind when performing any operation related to the view dim"""
         extra_info = {} if extra_info is None else extra_info
+        self.lidar_depth_repair_aux = None
         
         # format the input
         b, v, c, h, w = features.shape
@@ -1216,8 +883,7 @@ class DepthPredictorMultiView(nn.Module):
         if self.wo_cost_volume_refine:
             raw_correlation = self.corr_project(raw_correlation_in)
         else:
-            # Keep the pretrained Sequential parameter names intact while
-            # exposing the latent U-Net feature for optional LiDAR attention.
+        # Keep the pretrained Sequential parameter names intact.
             corr_feature = raw_correlation_in
             for module in list(self.corr_refine_net.children())[:-1]:
                 corr_feature = module(corr_feature)
@@ -1229,111 +895,12 @@ class DepthPredictorMultiView(nn.Module):
         depth_logits_vis = self.depth_head_lowres(raw_correlation)  
         pdf_vis = F.softmax(depth_logits_vis, dim=1)
         coarse_disps_vis = (disp_candi_curr * pdf_vis).sum(dim=1, keepdim=True)
-        coarse_before_attention = coarse_disps_vis
-
-        lidar_mask_low = None
-        lidar_disp_low = None
-        
         has_lidar = lidar_depth is not None and lidar_mask is not None
-        need_lidar = has_lidar and (
-            self.use_lidar_bias
-            or self.use_lidar_cross_attention
-        )
+        need_lidar = has_lidar and self.use_lidar_bias
 
-        if need_lidar:
-            (
-                lidar_bias,
-                lidar_mask_low,
-                lidar_disp_low,
-                lambda_surface_map,
-                lambda_free_map,
-                visual_entropy,
-                visual_lidar_residual,
-                lidar_local_density,
-                lidar_surface_prior,
-            ) = build_lidar_visibility_prior(
-                lidar_depth=lidar_depth,              # [B,V,1,H,W]
-                lidar_mask=lidar_mask,                # [B,V,1,H,W]
-                disp_candi_curr=disp_candi_curr,      # [v*b,D,1,1]
-                target_hw=depth_logits_vis.shape[-2:],    # (h,w)
-                visual_depth_logits=depth_logits_vis,
-                lambda_surface=self.lidar_lambda_surface,
-                lambda_free=self.lidar_lambda_free,
-                sigma_disp=self.lidar_sigma_disp,
-                free_margin=self.lidar_free_margin,
-            )
-            if self.use_lidar_cross_attention:
-                if self.lidar_cross_attention is None:
-                    raise RuntimeError(
-                        "LiDAR cross-attention module is not initialized."
-                    )
-                disp_min_low = disp_candi_curr.amin(
-                    dim=1,
-                    keepdim=True,
-                )
-                disp_max_low = disp_candi_curr.amax(
-                    dim=1,
-                    keepdim=True,
-                )
-
-                depth_logits_vis = self.lidar_cross_attention(
-                    visual_logits=depth_logits_vis,
-                    lidar_disp=lidar_disp_low,
-                    lidar_mask=lidar_mask_low,
-                    visual_disp=coarse_disps_vis,
-                    visual_entropy=visual_entropy,
-                    lidar_density=lidar_local_density,
-                    disp_min=disp_min_low,
-                    disp_max=disp_max_low,
-                )
-                pdf_vis = F.softmax(depth_logits_vis, dim=1)
-                coarse_disps_vis = (
-                    disp_candi_curr * pdf_vis
-                ).sum(dim=1, keepdim=True)
-            mask = lidar_mask_low.bool()
-
-            error_before = (
-                coarse_before_attention.detach() - lidar_disp_low
-            ).abs()
-            error_after = (
-                coarse_disps_vis - lidar_disp_low
-            ).abs()
-            if (
-                self.use_lidar_cross_attention
-                and mask.any()
-            ):
-                with torch.no_grad():
-                    valid_error_before = error_before[mask]
-                    valid_error_after = error_after[mask]
-                    error_improvement = (
-                        valid_error_before - valid_error_after
-                    )
-                    print(
-                        "[LiDAR Cross-Attention Diagnostics] "
-                        f"E_before="
-                        f"{valid_error_before.mean().item():.8f}, "
-                        f"E_after="
-                        f"{valid_error_after.mean().item():.8f}, "
-                        f"gain="
-                        f"{error_improvement.mean().item():.8f}, "
-                        f"improve_ratio="
-                        f"{(error_improvement > 0).float().mean().item():.4f}, "
-                        f"worsen_ratio="
-                        f"{(error_improvement < 0).float().mean().item():.4f}"
-                    )
-            # bias only changes the forward depth logits.
-            if self.use_lidar_bias:
-                # Soften visual logits only at valid LiDAR cells, then add the
-                # analytic surface/free-space bias. Non-LiDAR cells retain the
-                # original visual logits exactly.
-                depth_logits_calibrated = (
-                    depth_logits_vis * (1.0 - lidar_mask_low) + (depth_logits_vis / self.lidar_temperature) * lidar_mask_low
-             )
-                depth_logits_lidar = depth_logits_calibrated + lidar_bias
-            else:
-                depth_logits_lidar = depth_logits_vis
-        else:
-            depth_logits_lidar = depth_logits_vis 
+        # Keep the coarse/refinement path purely visual.  Valid full-resolution
+        # LiDAR samples are injected only into the final disparity below.
+        depth_logits_lidar = depth_logits_vis
 
         # softmax to get coarse depth and density
         pdf = F.softmax(depth_logits_lidar, dim=1)  # [v*b, D, h, w]
@@ -1343,6 +910,16 @@ class DepthPredictorMultiView(nn.Module):
         )  # (vb, 1, h, w)
         pdf_max = torch.max(pdf, dim=1, keepdim=True)[0]  # argmax
         pdf_max = F.interpolate(pdf_max, scale_factor=self.upscale_factor)
+        visual_pdf_max = F.interpolate(
+            torch.max(pdf_vis, dim=1, keepdim=True)[0],
+            scale_factor=self.upscale_factor,
+        )
+        visual_fullres_disps = F.interpolate(
+            coarse_disps_vis,
+            scale_factor=self.upscale_factor,
+            mode="bilinear",
+            align_corners=True,
+        )
         fullres_disps = F.interpolate(
             coarse_disps,
             scale_factor=self.upscale_factor,
@@ -1435,7 +1012,30 @@ class DepthPredictorMultiView(nn.Module):
                 v=v,
                 srf=1,
             )
-            depths = 1.0 / fullres_disps
+            final_disps = fullres_disps
+            if self.use_lidar_bias and lidar_depth is not None and lidar_mask is not None:
+                lidar_depth_full = rearrange(
+                    lidar_depth, "b v c h w -> (v b) c h w"
+                ).to(device=final_disps.device, dtype=final_disps.dtype)
+                lidar_mask_full = rearrange(
+                    lidar_mask, "b v c h w -> (v b) c h w"
+                ).to(device=final_disps.device)
+                disp_min = 1.0 / rearrange(
+                    far, "b v -> (v b) () () ()"
+                )
+                disp_max = 1.0 / rearrange(
+                    near, "b v -> (v b) () () ()"
+                )
+                lidar_disp_full = lidar_depth_full.clamp_min(1e-6).reciprocal()
+                valid = (
+                    (lidar_mask_full > 0.5)
+                    & torch.isfinite(lidar_depth_full)
+                    & (lidar_depth_full > 1e-6)
+                    & (lidar_disp_full >= disp_min)
+                    & (lidar_disp_full <= disp_max)
+                )
+                final_disps = torch.where(valid, lidar_disp_full, final_disps)
+            depths = 1.0 / final_disps
             depths = repeat(
                 depths,
                 "(v b) dpt h w -> b v (h w) srf dpt",
@@ -1484,50 +1084,39 @@ class DepthPredictorMultiView(nn.Module):
                     & (lidar_depth_full > 1e-6)
                 )
 
-            # Keep only the original full-resolution valid LiDAR pixels as
-            # hard anchors.  Do not expand a sparse LiDAR sample to the whole
-            # low-resolution cell when suppressing the refinement residual.
-            if self.use_lidar_bias and valid is not None:
-                lidar_support_full = valid.to(dtype=delta_disps.dtype)
-                raw_fine_disps = (
-                    fullres_disps
-                    + (1.0 - lidar_support_full) * delta_disps
-                )
-            else:
-                raw_fine_disps = fullres_disps + delta_disps
-            fine_disps = raw_fine_disps.clamp(
+            visual_fine_disps = (fullres_disps + delta_disps).clamp(
                 min=disp_min,
                 max=disp_max,
             )
 
-            # Accumulate full-resolution final-depth metrics over valid LiDAR pixels.
-            # These are evaluation diagnostics and do not participate in backpropagation.
-            if has_lidar and not self.training:
-                with torch.no_grad():
-                    final_depth = 1.0 / fine_disps[:, :1].clamp(min=1e-6)
-                    valid_depth = (
-                        valid
-                        & torch.isfinite(final_depth)
-                        & (final_depth > 0)
-                    )
+            # Inject LiDAR only after visual refinement.  A sample outside the
+            # camera near/far disparity interval is rejected instead of being
+            # clamped to a boundary and turned into a false hard anchor.
+            if self.use_lidar_bias and valid is not None:
+                lidar_disp_full = lidar_depth_full.clamp_min(1e-6).reciprocal()
+                valid = (
+                    valid
+                    & (lidar_disp_full >= disp_min)
+                    & (lidar_disp_full <= disp_max)
+                )
+                fine_disps = torch.where(
+                    valid,
+                    lidar_disp_full,
+                    visual_fine_disps,
+                )
+            else:
+                fine_disps = visual_fine_disps
 
-                    if valid_depth.any():
-                        target_depth = lidar_depth_full[valid_depth]
-                        predicted_depth = final_depth[valid_depth]
-                        abs_error = (predicted_depth - target_depth).abs()
-
-                        self.lidar_diag["final_depth_num_points"] += int(
-                            valid_depth.sum().item()
-                        )
-                        self.lidar_diag["final_depth_abs_error_sum"] += (
-                            abs_error.sum().item()
-                        )
-                        self.lidar_diag["final_depth_abs_rel_sum"] += (
-                            (abs_error / target_depth).sum().item()
-                        )
-                        self.lidar_diag["final_depth_sq_error_sum"] += (
-                            (predicted_depth - target_depth).square().sum().item()
-                        )
+            self.lidar_depth_repair_aux = None
+            if self.compute_lidar_depth_repair_aux:
+                # The visual refinement is now shared exactly.  Only the final
+                # disparity at a valid LiDAR pixel differs from this reference.
+                self.lidar_depth_repair_aux = {
+                    "reference_disparity": visual_fine_disps[:, :1].detach(),
+                    "biased_disparity": fine_disps[:, :1].detach(),
+                    "shallow_feature": proj_feat_in_fullres.detach(),
+                    "refine_feature": refine_out.detach(),
+                }
 
             # ============================================================
             # LiDAR 三阶段误差诊断：

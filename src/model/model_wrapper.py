@@ -122,71 +122,10 @@ class ModelWrapper(LightningModule):
         # This is used for testing.
         self.benchmarker = Benchmarker()
         self.eval_cnt = 0
-        self._last_lidar_cross_attention_grad_log_step = None
         if self.test_cfg.compute_scores:
             self.test_step_outputs = {}
             self.time_skip_steps_dict = {"encoder": 0, "decoder": 0}
             
-    def on_load_checkpoint(self, checkpoint: dict) -> None:
-        """Make legacy checkpoints compatible and select inference LiDAR modules."""
-        state_dict = checkpoint["state_dict"]
-        is_training = get_cfg().mode == "train"
-        depth_predictor = getattr(self.encoder, "depth_predictor", None)
-
-        if is_training:
-            return
-        legacy_lidar_prefix = "encoder.depth_predictor.lidar_depth_parameter_net."
-        cross_attention_prefix = (
-            "encoder.depth_predictor.lidar_cross_attention."
-        )
-        has_legacy_net = any(
-            key.startswith(legacy_lidar_prefix) for key in state_dict
-        )
-        has_lidar_cross_attention = any(
-            key.startswith(cross_attention_prefix) for key in state_dict
-        )
-        
-        if depth_predictor is None:
-            return
-        if has_legacy_net:
-            # Ignore legacy optional LiDAR modules from older checkpoints.
-            pass
-        if hasattr(
-            depth_predictor,
-            "set_lidar_cross_attention_enabled",
-        ):
-            inference_mode = getattr(
-                depth_predictor,
-                "lidar_cross_attention_inference_mode",
-                "auto",
-            )
-            if inference_mode == "off":
-                enable_lidar_cross_attention = False
-            elif inference_mode == "on":
-                if not has_lidar_cross_attention:
-                    raise ValueError(
-                        "LiDAR cross-attention was forced on for inference, "
-                        "but the checkpoint contains no attention weights."
-                    )
-                enable_lidar_cross_attention = True
-            else:
-                enable_lidar_cross_attention = has_lidar_cross_attention
-            depth_predictor.set_lidar_cross_attention_enabled(
-                enable_lidar_cross_attention
-            )
-        else:
-            enable_lidar_cross_attention = False
-        if enable_lidar_cross_attention:
-            architecture = "local LiDAR cross-attention on depth logits"
-        else:
-            architecture = "fixed analytic prior"
-        print(
-            "==> Inference LiDAR architecture selected from checkpoint: "
-            f"{architecture} "
-            f"(cross-attention mode={getattr(depth_predictor, 'lidar_cross_attention_inference_mode', 'auto')})."
-        )
-
-
     def _lidar_gaussian_adapter_losses(
         self,
         edited_output,
@@ -294,6 +233,307 @@ class ModelWrapper(LightningModule):
             "lidar_gaussian_alpha_worse": alpha_worse,
         }
 
+    def _render_lidar_neighbor_depth_reference_gaussians(
+        self,
+        batch: BatchedExample,
+    ) -> Gaussians:
+        """Render-time RE10K reference with every LiDAR intervention disabled."""
+        depth_predictor = getattr(self.encoder, "depth_predictor", None)
+        if depth_predictor is None:
+            raise RuntimeError("LiDAR neighbor repair requires a depth predictor.")
+        original_use_lidar_bias = depth_predictor.use_lidar_bias
+        original_use_anchor_adapter = depth_predictor.use_lidar_gaussian_adapter
+        original_neighbor_enabled = (
+            self.encoder.lidar_neighbor_depth_repair_enabled
+        )
+        original_compute_aux = depth_predictor.compute_lidar_depth_repair_aux
+        try:
+            depth_predictor.use_lidar_bias = False
+            depth_predictor.use_lidar_gaussian_adapter = False
+            self.encoder.lidar_neighbor_depth_repair_enabled = False
+            depth_predictor.compute_lidar_depth_repair_aux = False
+            with torch.no_grad():
+                return self.encoder(
+                    batch["context"],
+                    self.global_step,
+                    False,
+                    scene_names=batch["scene"],
+                )
+        finally:
+            depth_predictor.use_lidar_bias = original_use_lidar_bias
+            depth_predictor.use_lidar_gaussian_adapter = (
+                original_use_anchor_adapter
+            )
+            self.encoder.lidar_neighbor_depth_repair_enabled = (
+                original_neighbor_enabled
+            )
+            depth_predictor.compute_lidar_depth_repair_aux = original_compute_aux
+
+    def _lidar_neighbor_depth_losses(
+        self,
+        edited_output,
+        edited_gaussians: Gaussians,
+        batch: BatchedExample,
+        image_shape: tuple[int, int],
+    ) -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+        """Train local neighbor depth repair against frozen anchor/RE10K branches."""
+        base_gaussians = getattr(
+            edited_gaussians,
+            "lidar_neighbor_depth_base_gaussians",
+            None,
+        )
+        repair_mask = getattr(
+            edited_gaussians,
+            "lidar_neighbor_depth_mask",
+            None,
+        )
+        if base_gaussians is None or repair_mask is None:
+            raise RuntimeError(
+                "LiDAR neighbor depth loss requires its frozen base branch, "
+                "and selection mask."
+            )
+
+        selected_base_gaussians = Gaussians(
+            base_gaussians.means,
+            base_gaussians.covariances,
+            base_gaussians.harmonics,
+            base_gaussians.opacities * repair_mask.to(
+                base_gaussians.opacities.dtype
+            ),
+        )
+        selected_edit_gaussians = Gaussians(
+            edited_gaussians.means,
+            edited_gaussians.covariances,
+            edited_gaussians.harmonics,
+            edited_gaussians.opacities * repair_mask.to(
+                edited_gaussians.opacities.dtype
+            ),
+        )
+        reference_gaussians = self._render_lidar_neighbor_depth_reference_gaussians(
+            batch
+        )
+        render_args = (
+            batch["target"]["extrinsics"],
+            batch["target"]["intrinsics"],
+            batch["target"]["near"],
+            batch["target"]["far"],
+            image_shape,
+        )
+        with torch.no_grad():
+            base_output = self.decoder.forward(
+                base_gaussians,
+                *render_args,
+                depth_mode=self.train_cfg.depth_mode,
+            )
+            base_alpha = self.decoder.render_alpha(
+                base_gaussians,
+                *render_args,
+            ).unsqueeze(2)
+            reference_alpha = self.decoder.render_alpha(
+                reference_gaussians,
+                *render_args,
+            ).unsqueeze(2)
+            influence = self.decoder.render_alpha(
+                selected_base_gaussians,
+                *render_args,
+            ).unsqueeze(2)
+            edited_influence = self.decoder.render_alpha(
+                selected_edit_gaussians,
+                *render_args,
+            ).unsqueeze(2)
+            influence = torch.maximum(influence, edited_influence)
+        edited_alpha = self.decoder.render_alpha(
+            edited_gaussians,
+            *render_args,
+        ).unsqueeze(2)
+
+        target = batch["target"]["image"]
+        valid = torch.ones_like(target[:, :, :1])
+        dynamic_mask = batch["target"].get("dynamic_mask")
+        if dynamic_mask is not None:
+            valid = valid * (dynamic_mask < 0.5).to(
+                device=valid.device,
+                dtype=valid.dtype,
+            )
+        weight = influence.detach().clamp(0.0, 1.0) * valid
+        pixel_denominator = weight.sum().clamp_min(1.0)
+        rgb_denominator = (pixel_denominator * target.shape[2]).clamp_min(1.0)
+        edited_abs_error = (edited_output.color - target).abs()
+        base_abs_error = (base_output.color - target).abs().detach()
+        local_rgb = (edited_abs_error * weight).sum() / rgb_denominator
+        improvement = (
+            torch.relu(
+                edited_abs_error.mean(dim=2, keepdim=True)
+                - base_abs_error.mean(dim=2, keepdim=True)
+            )
+            * weight
+        ).sum() / pixel_denominator
+
+        coverage_deficit = (
+            weight
+            * torch.relu(reference_alpha.detach() - base_alpha.detach())
+        ).detach()
+        deficit_denominator = coverage_deficit.sum().clamp_min(1e-6)
+        alpha_under = (
+            coverage_deficit
+            * torch.relu(reference_alpha.detach() - edited_alpha)
+        ).sum() / deficit_denominator
+        alpha_tolerance = float(
+            self.encoder.cfg.lidar_neighbor_depth_alpha_tolerance
+        )
+        base_alpha_over = torch.relu(
+            base_alpha.detach() - reference_alpha.detach() - alpha_tolerance
+        )
+        edited_alpha_over = torch.relu(
+            edited_alpha - reference_alpha.detach() - alpha_tolerance
+        )
+        alpha_over_worse = (
+            weight
+            * torch.relu(
+                edited_alpha_over - base_alpha_over
+            )
+        ).sum() / pixel_denominator
+        initial_missing = torch.relu(
+            reference_alpha.detach() - base_alpha.detach()
+        )
+        remaining_missing = torch.relu(
+            reference_alpha.detach() - edited_alpha.detach()
+        )
+        alpha_deficit_before = (
+            weight * initial_missing
+        ).sum() / pixel_denominator
+        alpha_deficit_after = (
+            weight * remaining_missing
+        ).sum() / pixel_denominator
+        alpha_deficit_improvement = (
+            alpha_deficit_before - alpha_deficit_after
+        )
+        alpha_deficit_relative_improvement = (
+            alpha_deficit_improvement
+            / alpha_deficit_before.clamp_min(1e-6)
+        )
+        deficit_pixel_weight = (
+            weight * (initial_missing > 1e-6).to(weight.dtype)
+        )
+        deficit_pixel_denominator = deficit_pixel_weight.sum().clamp_min(1.0)
+        alpha_improved_pixel_ratio = (
+            deficit_pixel_weight
+            * (remaining_missing < initial_missing - 1e-6).to(weight.dtype)
+        ).sum() / deficit_pixel_denominator
+        alpha_worsened_pixel_ratio = (
+            deficit_pixel_weight
+            * (remaining_missing > initial_missing + 1e-6).to(weight.dtype)
+        ).sum() / deficit_pixel_denominator
+        alpha_mean_change = (
+            weight * (edited_alpha.detach() - base_alpha.detach())
+        ).sum() / pixel_denominator
+        recovered_ratio = (
+            coverage_deficit
+            * (initial_missing - remaining_missing)
+        ).sum() / (
+            coverage_deficit * initial_missing
+        ).sum().clamp_min(1e-6)
+        residual = getattr(
+            edited_gaussians,
+            "lidar_neighbor_depth_residual",
+            None,
+        )
+        base_disparity = getattr(
+            edited_gaussians,
+            "lidar_neighbor_depth_base_disparity",
+            None,
+        )
+        if residual is None or base_disparity is None:
+            raise RuntimeError(
+                "LiDAR neighbor depth residual or base disparity is missing."
+            )
+        residual_flat = residual.reshape_as(repair_mask)
+        relative_residual = residual_flat / base_disparity.clamp_min(1e-6)
+        target_disparity = getattr(
+            edited_gaussians,
+            "lidar_neighbor_depth_target_disparity",
+            None,
+        )
+        attraction_confidence = getattr(
+            edited_gaussians,
+            "lidar_neighbor_depth_attraction_confidence",
+            None,
+        )
+        if target_disparity is None or attraction_confidence is None:
+            raise RuntimeError(
+                "LiDAR neighbor attraction target or confidence is missing."
+            )
+        initial_target_distance = (target_disparity - base_disparity).abs()
+        edited_target_distance = (
+            target_disparity - (base_disparity + residual_flat)
+        ).abs()
+        attraction_ratio = 1.0 - (
+            edited_target_distance
+            / initial_target_distance.clamp_min(1e-6)
+        )
+        attraction_weight = (
+            attraction_confidence
+            * repair_mask.to(attraction_confidence.dtype)
+            * (initial_target_distance > 1e-6).to(attraction_confidence.dtype)
+        ).detach()
+        attraction = (
+            attraction_weight
+            * torch.relu(
+                float(self.encoder.cfg.lidar_neighbor_depth_min_attraction)
+                - attraction_ratio
+            )
+        ).sum() / attraction_weight.sum().clamp_min(1.0)
+        losses = {
+            "lidar_neighbor_depth_local_rgb": local_rgb,
+            "lidar_neighbor_depth_improvement": improvement,
+            "lidar_neighbor_depth_alpha_under": alpha_under,
+            "lidar_neighbor_depth_alpha_over_worse": alpha_over_worse,
+            "lidar_neighbor_depth_attraction": attraction,
+        }
+        metrics = {
+            "lidar_neighbor_depth_selected_count": repair_mask.sum().detach(),
+            "lidar_neighbor_depth_alpha_deficit_recovered": recovered_ratio.detach(),
+            "lidar_neighbor_depth_alpha_deficit_before": (
+                alpha_deficit_before.detach()
+            ),
+            "lidar_neighbor_depth_alpha_deficit_after": (
+                alpha_deficit_after.detach()
+            ),
+            "lidar_neighbor_depth_alpha_deficit_improvement": (
+                alpha_deficit_improvement.detach()
+            ),
+            "lidar_neighbor_depth_alpha_deficit_relative_improvement": (
+                alpha_deficit_relative_improvement.detach()
+            ),
+            "lidar_neighbor_depth_alpha_improved_pixel_ratio": (
+                alpha_improved_pixel_ratio.detach()
+            ),
+            "lidar_neighbor_depth_alpha_worsened_pixel_ratio": (
+                alpha_worsened_pixel_ratio.detach()
+            ),
+            "lidar_neighbor_depth_alpha_mean_change": alpha_mean_change.detach(),
+            "lidar_neighbor_depth_attraction_ratio": (
+                attraction_weight * attraction_ratio
+            ).sum().div(attraction_weight.sum().clamp_min(1.0)).detach(),
+            "lidar_neighbor_depth_attraction_confidence": (
+                attraction_weight.sum()
+                / repair_mask.sum().clamp_min(1.0)
+            ).detach(),
+            "lidar_neighbor_depth_mean_abs_relative_delta": (
+                relative_residual.abs().sum()
+                / repair_mask.sum().clamp_min(1.0)
+            ).detach(),
+            "lidar_neighbor_depth_positive_delta_ratio": (
+                ((relative_residual > 0) & repair_mask.bool()).sum()
+                / repair_mask.sum().clamp_min(1.0)
+            ).detach(),
+            "lidar_neighbor_depth_negative_delta_ratio": (
+                ((relative_residual < 0) & repair_mask.bool()).sum()
+                / repair_mask.sum().clamp_min(1.0)
+            ).detach(),
+        }
+        return losses, metrics
+
     def training_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
         _, _, _, h, w = batch["target"]["image"].shape
@@ -326,7 +566,14 @@ class ModelWrapper(LightningModule):
                 False,
             )
         )
-        if not use_adapter_loss:
+        use_neighbor_depth_loss = bool(
+            getattr(
+                self.encoder.cfg,
+                "use_lidar_gaussian_neighbor_depth_loss",
+                False,
+            )
+        )
+        if not use_adapter_loss and not use_neighbor_depth_loss:
             psnr_probabilistic = compute_psnr(
                 rearrange(target_gt, "b v c h w -> (b v) c h w"),
                 rearrange(output.color, "b v c h w -> (b v) c h w"),
@@ -335,7 +582,7 @@ class ModelWrapper(LightningModule):
 
         # Compute and log loss.
         total_loss = 0
-        if not use_adapter_loss:
+        if not use_adapter_loss and not use_neighbor_depth_loss:
             for loss_fn in self.losses:
                 loss = loss_fn.forward(output, batch, gaussians, self.global_step)
                 self.log(f"loss/{loss_fn.name}", loss)
@@ -363,6 +610,36 @@ class ModelWrapper(LightningModule):
             for name, loss in adapter_losses.items():
                 total_loss = total_loss + adapter_loss_weights[name] * loss
                 self.log(f"loss/{name}", loss)
+        if use_neighbor_depth_loss:
+            neighbor_losses, neighbor_metrics = self._lidar_neighbor_depth_losses(
+                output,
+                gaussians,
+                batch,
+                (h, w),
+            )
+            coverage_loss = (
+                neighbor_losses["lidar_neighbor_depth_alpha_under"]
+                + float(
+                    self.encoder.cfg.lidar_neighbor_depth_over_alpha_worse_weight
+                )
+                * neighbor_losses["lidar_neighbor_depth_alpha_over_worse"]
+            )
+            neighbor_total = (
+                float(self.encoder.cfg.lidar_neighbor_depth_local_rgb_weight)
+                * neighbor_losses["lidar_neighbor_depth_local_rgb"]
+                + float(self.encoder.cfg.lidar_neighbor_depth_improvement_weight)
+                * neighbor_losses["lidar_neighbor_depth_improvement"]
+                + float(self.encoder.cfg.lidar_neighbor_depth_coverage_weight)
+                * coverage_loss
+                + float(self.encoder.cfg.lidar_neighbor_depth_attraction_weight)
+                * neighbor_losses["lidar_neighbor_depth_attraction"]
+            )
+            total_loss = total_loss + neighbor_total
+            for name, loss in neighbor_losses.items():
+                self.log(f"loss/{name}", loss)
+            self.log("loss/lidar_neighbor_depth_total", neighbor_total)
+            for name, value in neighbor_metrics.items():
+                self.log(f"metric/{name}", value)
         context_render_weight = float(
             getattr(
                 self.encoder.cfg,
@@ -438,50 +715,6 @@ class ModelWrapper(LightningModule):
         """Report whether optional LiDAR branches receive gradients."""
         if self.global_rank != 0:
             return
-
-        depth_predictor = getattr(self.encoder, "depth_predictor", None)
-        cross_attention = getattr(
-            depth_predictor,
-            "lidar_cross_attention",
-            None,
-        )
-        step = int(self.global_step)
-        should_log_cross_attention = (
-            cross_attention is not None
-            and (
-                step < 3
-                or step % 100 == 0
-            )
-            and self._last_lidar_cross_attention_grad_log_step != step
-        )
-        if should_log_cross_attention:
-            parameters = dict(cross_attention.named_parameters())
-            diagnostic_names = (
-                "query_proj.weight",
-                "lidar_attribute_encoder.0.weight",
-                "lidar_attribute_encoder.2.weight",
-            )
-            print(
-                f"[LiDAR Cross-Attention Gradients] step={step}"
-            )
-            for name in diagnostic_names:
-                parameter = parameters.get(name)
-                if parameter is None:
-                    print(f"  {name}: missing")
-                    continue
-                gradient = parameter.grad
-                gradient_norm = (
-                    None
-                    if gradient is None
-                    else gradient.detach().norm().item()
-                )
-                print(
-                    f"  {name}: "
-                    f"requires_grad={parameter.requires_grad}, "
-                    f"param_norm={parameter.detach().norm().item():.8e}, "
-                    f"grad_norm={gradient_norm}"
-                )
-            self._last_lidar_cross_attention_grad_log_step = step
         if (
             self.global_step
             % self.train_cfg.print_log_every_n_steps
@@ -738,52 +971,6 @@ class ModelWrapper(LightningModule):
                 self.test_cfg.output_path / name / "peak_memory.json"
             )
             self.benchmarker.summarize()
-        # ------------------------------------------------------------
-        # 输出整个测试集上的 LiDAR refinement 诊断结果
-        # ------------------------------------------------------------
-        depth_predictor = getattr(
-            self.encoder,
-            "depth_predictor",
-            None,
-        )
-
-        diag = getattr(
-            depth_predictor,
-            "lidar_diag",
-            None,
-        )
-        if diag is not None and diag["final_depth_num_points"] > 0:
-            num_points = diag["final_depth_num_points"]
-            lidar_depth_metrics = {
-                "num_points": num_points,
-                "mae": diag["final_depth_abs_error_sum"] / num_points,
-                "abs_rel": diag["final_depth_abs_rel_sum"] / num_points,
-                "rmse": (
-                    diag["final_depth_sq_error_sum"] / num_points
-                ) ** 0.5,
-            }
-
-            print(
-                "[Final depth LiDAR metrics] "
-                f"points={lidar_depth_metrics['num_points']}, "
-                f"MAE={lidar_depth_metrics['mae']:.6f} m, "
-                f"AbsRel={lidar_depth_metrics['abs_rel']:.6f}, "
-                f"RMSE={lidar_depth_metrics['rmse']:.6f} m"
-            )
-            
-            out_dir.mkdir(parents=True, exist_ok=True)
-            with (out_dir / "final_depth_lidar_metrics.json").open("w") as f:
-                json.dump(lidar_depth_metrics, f, indent=2)
-
-            for key in (
-                "final_depth_num_points",
-                "final_depth_abs_error_sum",
-                "final_depth_abs_rel_sum",
-                "final_depth_sq_error_sum",
-            ):
-                diag[key] = 0 if key == "final_depth_num_points" else 0.0
-   
-
     @rank_zero_only
     def validation_step(self, batch, batch_idx):
         return
