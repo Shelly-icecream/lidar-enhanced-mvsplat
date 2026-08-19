@@ -753,34 +753,63 @@ class ModelWrapper(LightningModule):
 
         lidar_alpha_diagnostics = None
         if self.test_cfg.save_lidar_alpha_diagnostics:
-            depth_predictor = getattr(self.encoder, "depth_predictor", None)
-            if depth_predictor is None:
-                raise RuntimeError("LiDAR alpha diagnostics require a depth predictor.")
-            original_use_lidar_bias = depth_predictor.use_lidar_bias
-            original_use_gaussian_adapter = (
-                depth_predictor.use_lidar_gaussian_adapter
+            base_gaussians = getattr(
+                gaussians,
+                "lidar_neighbor_depth_base_gaussians",
+                None,
             )
-            try:
-                # Isolate the analytic depth bias: disable Gaussian parameter
-                # edits in both branches and vary only use_lidar_bias.
-                depth_predictor.use_lidar_gaussian_adapter = False
-                depth_predictor.use_lidar_bias = False
-                visual_gaussians = self.encoder(
-                    batch["context"],
-                    self.global_step,
-                    deterministic=True,
+            repair_mask = getattr(
+                gaussians,
+                "lidar_neighbor_depth_mask",
+                None,
+            )
+            if base_gaussians is not None and repair_mask is not None:
+                # Compare the exact base and edited branches from the same
+                # neighbor-depth forward pass. Rendering the selected Gaussians
+                # projects the source-view repair mask into each target view.
+                visual_gaussians = base_gaussians
+                biased_gaussians = gaussians
+                selected_base_gaussians = Gaussians(
+                    base_gaussians.means,
+                    base_gaussians.covariances,
+                    base_gaussians.harmonics,
+                    base_gaussians.opacities
+                    * repair_mask.to(base_gaussians.opacities.dtype),
                 )
-                depth_predictor.use_lidar_bias = True
-                biased_gaussians = self.encoder(
-                    batch["context"],
-                    self.global_step,
-                    deterministic=True,
+                selected_biased_gaussians = Gaussians(
+                    gaussians.means,
+                    gaussians.covariances,
+                    gaussians.harmonics,
+                    gaussians.opacities
+                    * repair_mask.to(gaussians.opacities.dtype),
                 )
-            finally:
-                depth_predictor.use_lidar_bias = original_use_lidar_bias
-                depth_predictor.use_lidar_gaussian_adapter = (
-                    original_use_gaussian_adapter
+            else:
+                depth_predictor = getattr(self.encoder, "depth_predictor", None)
+                if depth_predictor is None:
+                    raise RuntimeError(
+                        "LiDAR alpha diagnostics require a depth predictor."
+                    )
+                original_use_lidar_bias = depth_predictor.use_lidar_bias
+                original_use_gaussian_adapter = (
+                    depth_predictor.use_lidar_gaussian_adapter
                 )
+                try:
+                    depth_predictor.use_lidar_gaussian_adapter = False
+                    depth_predictor.use_lidar_bias = False
+                    visual_gaussians = self.encoder(
+                        batch["context"], self.global_step, deterministic=True
+                    )
+                    depth_predictor.use_lidar_bias = True
+                    biased_gaussians = self.encoder(
+                        batch["context"], self.global_step, deterministic=True
+                    )
+                finally:
+                    depth_predictor.use_lidar_bias = original_use_lidar_bias
+                    depth_predictor.use_lidar_gaussian_adapter = (
+                        original_use_gaussian_adapter
+                    )
+                selected_base_gaussians = None
+                selected_biased_gaussians = None
 
             visual_rgb = self.decoder.forward(
                 visual_gaussians,
@@ -842,6 +871,26 @@ class ModelWrapper(LightningModule):
                 "visual_depth": visual_depth[0],
                 "biased_depth": biased_depth[0],
             }
+            if selected_base_gaussians is not None:
+                selected_base_alpha = self.decoder.render_alpha(
+                    selected_base_gaussians,
+                    batch["target"]["extrinsics"],
+                    batch["target"]["intrinsics"],
+                    batch["target"]["near"],
+                    batch["target"]["far"],
+                    (h, w),
+                )
+                selected_biased_alpha = self.decoder.render_alpha(
+                    selected_biased_gaussians,
+                    batch["target"]["extrinsics"],
+                    batch["target"]["intrinsics"],
+                    batch["target"]["near"],
+                    batch["target"]["far"],
+                    (h, w),
+                )
+                lidar_alpha_diagnostics["selected_influence"] = torch.maximum(
+                    selected_base_alpha[0], selected_biased_alpha[0]
+                )
 
         # Save images.
         if self.test_cfg.save_image:
@@ -882,6 +931,25 @@ class ModelWrapper(LightningModule):
                         (biased_alpha - visual_alpha).abs(),
                         diag_dir / f"{index.item():0>6}_alpha_abs_diff.png",
                     )
+                    alpha_loss = (visual_alpha - biased_alpha).clamp_min(0.0)
+                    alpha_gain = (biased_alpha - visual_alpha).clamp_min(0.0)
+                    save_image(
+                        alpha_loss,
+                        diag_dir / f"{index.item():0>6}_alpha_loss.png",
+                    )
+                    save_image(
+                        alpha_gain,
+                        diag_dir / f"{index.item():0>6}_alpha_gain.png",
+                    )
+                    if "selected_influence" in lidar_alpha_diagnostics:
+                        selected_influence = lidar_alpha_diagnostics[
+                            "selected_influence"
+                        ][target_position]
+                        save_image(
+                            selected_influence,
+                            diag_dir
+                            / f"{index.item():0>6}_selected_influence.png",
+                        )
                     save_image(
                         (biased_depth - visual_depth).abs(),
                         diag_dir / f"{index.item():0>6}_depth_abs_diff.png",
@@ -892,6 +960,13 @@ class ModelWrapper(LightningModule):
                         < visual_rgb.mean(dim=0) - 0.05
                     )
                     if darkened.any():
+                        alpha_hole = visual_alpha > biased_alpha + 0.05
+                        if "selected_influence" in lidar_alpha_diagnostics:
+                            selected_influence = lidar_alpha_diagnostics[
+                                "selected_influence"
+                            ][target_position]
+                        else:
+                            selected_influence = torch.zeros_like(visual_alpha)
                         print(
                             "[LiDAR Alpha Diagnostics] "
                             f"scene={scene}, target={index.item()}, "
@@ -902,6 +977,10 @@ class ModelWrapper(LightningModule):
                             f"{(biased_alpha[darkened] > 0.9).float().mean().item():.4f}, "
                             f"alpha_bias_lt_0.1="
                             f"{(biased_alpha[darkened] < 0.1).float().mean().item():.4f}, "
+                            f"darkened_with_alpha_hole="
+                            f"{alpha_hole[darkened].float().mean().item():.4f}, "
+                            f"darkened_selected_influence="
+                            f"{(selected_influence[darkened] > 0.05).float().mean().item():.4f}, "
                             f"depth_abs_diff="
                             f"{(biased_depth[darkened] - visual_depth[darkened]).abs().mean().item():.4f}"
                         )

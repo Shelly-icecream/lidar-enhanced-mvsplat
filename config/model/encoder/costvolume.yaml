@@ -61,6 +61,8 @@ use_lidar_gaussian_neighbor_depth_adapter: false
 use_lidar_gaussian_neighbor_depth_loss: false
 lidar_neighbor_depth_radius: 2
 lidar_neighbor_depth_topk: 4
+lidar_neighbor_depth_min_neighbors_before_gap: 4
+lidar_neighbor_depth_min_log_score_gap: 0.4
 lidar_neighbor_depth_max_relative_ref_disparity_error: 0.05
 lidar_neighbor_depth_reference_bound_margin: 0.02
 lidar_neighbor_depth_min_shallow_cosine: 0.85

@@ -37,7 +37,7 @@ class OpacityMappingCfg:
 class LidarNeighborDepthMLP(nn.Module):
     """Predict how strongly a neighbor moves toward a LiDAR-biased anchor."""
 
-    def __init__(self, input_dim: int = 12, hidden_dim: int = 64) -> None:
+    def __init__(self, input_dim: int = 10, hidden_dim: int = 64) -> None:
         super().__init__()
         self.network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -98,6 +98,8 @@ class EncoderCostVolumeCfg:
     use_lidar_gaussian_neighbor_depth_loss: bool
     lidar_neighbor_depth_radius: int
     lidar_neighbor_depth_topk: int
+    lidar_neighbor_depth_min_neighbors_before_gap: int
+    lidar_neighbor_depth_min_log_score_gap: float
     lidar_neighbor_depth_max_relative_ref_disparity_error: float
     lidar_neighbor_depth_reference_bound_margin: float
     lidar_neighbor_depth_min_shallow_cosine: float
@@ -225,6 +227,19 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 raise ValueError(
                     "LiDAR neighbor repair top-k must be between 1 and "
                     f"{max_neighbors}."
+                )
+            if not (
+                1
+                <= cfg.lidar_neighbor_depth_min_neighbors_before_gap
+                <= cfg.lidar_neighbor_depth_topk
+            ):
+                raise ValueError(
+                    "LiDAR neighbor minimum neighbors before score-gap "
+                    "truncation must be between 1 and top-k."
+                )
+            if cfg.lidar_neighbor_depth_min_log_score_gap < 0:
+                raise ValueError(
+                    "LiDAR neighbor minimum log score gap must be non-negative."
                 )
             if cfg.lidar_neighbor_depth_max_relative_ref_disparity_error <= 0:
                 raise ValueError(
@@ -502,19 +517,52 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             ) / 2.0,
             1e-6,
         )
-        support_score = spatial_score * torch.exp(
-            -relative_ref_error / disparity_scale
-        )
-        support_score = support_score * ((shallow_cosine + 1.0) * 0.5)
-        support_score = support_score * ((refine_cosine + 1.0) * 0.5)
+        # Select candidates using only appearance and geometry. Pixel distance
+        # must not decide which neighbors enter top-k.
+        semantic_score = torch.exp(-relative_ref_error / disparity_scale)
+        semantic_score = semantic_score * ((shallow_cosine + 1.0) * 0.5)
+        semantic_score = semantic_score * ((refine_cosine + 1.0) * 0.5)
         rgb_scale = max(
             float(self.cfg.lidar_neighbor_depth_max_rgb_difference) / 2.0,
             1e-6,
         )
-        support_score = support_score * torch.exp(-rgb_difference / rgb_scale)
-        support_score = support_score * candidate_valid.to(support_score.dtype)
-        top_support, top_patch_index = support_score.topk(topk, dim=1)
-        selected = (top_support > 0).nonzero(as_tuple=False)
+        semantic_score = semantic_score * torch.exp(-rgb_difference / rgb_scale)
+        semantic_score = semantic_score * candidate_valid.to(semantic_score.dtype)
+        top_semantic, top_patch_index = semantic_score.topk(topk, dim=1)
+        valid_top = top_semantic > 0
+        valid_count = valid_top.sum(dim=1, keepdim=True)
+        min_neighbors = int(
+            self.cfg.lidar_neighbor_depth_min_neighbors_before_gap
+        )
+        min_log_gap = float(
+            self.cfg.lidar_neighbor_depth_min_log_score_gap
+        )
+        if topk > 1:
+            log_score = torch.log(top_semantic.clamp_min(1e-12))
+            log_gap = log_score[:, :-1] - log_score[:, 1:]
+            gap_slot = torch.arange(
+                topk - 1,
+                device=top_semantic.device,
+            )[None, :, None]
+            eligible_gap = (
+                (gap_slot >= min_neighbors - 1)
+                & valid_top[:, :-1]
+                & valid_top[:, 1:]
+            )
+            masked_gap = log_gap.masked_fill(~eligible_gap, float("-inf"))
+            largest_gap, largest_gap_slot = masked_gap.max(dim=1, keepdim=True)
+            gap_keep_count = largest_gap_slot + 1
+            use_gap = largest_gap >= min_log_gap
+            keep_count = torch.where(use_gap, gap_keep_count, valid_count)
+        else:
+            use_gap = torch.zeros_like(valid_count, dtype=torch.bool)
+            keep_count = valid_count
+        top_slot_grid = torch.arange(
+            topk,
+            device=top_semantic.device,
+        )[None, :, None]
+        selected_mask = valid_top & (top_slot_grid < keep_count)
+        selected = selected_mask.nonzero(as_tuple=False)
 
         if selected.numel() == 0:
             diagnostic_interval = int(
@@ -552,11 +600,15 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         top_slot = selected[:, 1]
         anchor_index = selected[:, 2]
         patch_index = top_patch_index[sample_index, top_slot, anchor_index]
-        support = top_support[sample_index, top_slot, anchor_index]
+        pair_semantic = top_semantic[sample_index, top_slot, anchor_index]
         anchor_x = anchor_index % width
         anchor_y = anchor_index // width
         offset_x = offsets_x[patch_index]
         offset_y = offsets_y[patch_index]
+        pair_spatial = spatial_score[0, patch_index, 0]
+        # Distance is used only when several anchors are aggregated for the
+        # same neighbor. It does not affect top-k or the per-pair MLP gate.
+        support = pair_semantic * pair_spatial
         neighbor_x = anchor_x + offset_x
         neighbor_y = anchor_y + offset_y
         neighbor_index = neighbor_y * width + neighbor_x
@@ -593,12 +645,10 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 (neighbor_ref_value / disp_scale)[:, None],
                 (neighbor_biased_value / disp_scale)[:, None],
                 (biased_gap / disp_scale)[:, None],
-                (offset_x.to(biased_disp.dtype) / radius)[:, None],
-                (offset_y.to(biased_disp.dtype) / radius)[:, None],
                 pair_shallow_cosine[:, None],
                 pair_refine_cosine[:, None],
                 pair_rgb_difference[:, None],
-                support[:, None],
+                pair_semantic[:, None],
             ),
             dim=-1,
         ).detach()
@@ -722,7 +772,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                     (proposed_disp < far_disp) | (proposed_disp > near_disp)
                 )
 
-                anchor_support_sum = top_support.sum(dim=1)
+                anchor_support_sum = top_semantic.sum(dim=1)
                 representative_flat = anchor_support_sum.reshape(-1).argmax()
                 representative_sample = representative_flat // num_pixels
                 representative_anchor = representative_flat % num_pixels
@@ -748,7 +798,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 )
                 selected_before_depth = before_depth[selected_neighbor]
                 selected_after_depth = after_depth[selected_neighbor]
-                anchors_with_neighbors = (support_score.sum(dim=1) > 0).sum()
+                anchors_with_neighbors = (semantic_score.sum(dim=1) > 0).sum()
                 unique_neighbors = selected_neighbor.sum()
                 print(
                     "\n[NeighborDepth Global] "
@@ -761,6 +811,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                     f"after_refine={int(refine_candidate.sum().item())} "
                     f"after_rgb={int(candidate_valid.sum().item())} "
                     f"anchors_with_neighbors={int(anchors_with_neighbors.item())} "
+                    f"gap_truncated_anchors={int(use_gap.sum().item())} "
                     f"selected_pairs={selected.shape[0]} "
                     f"unique_neighbors={int(unique_neighbors.item())} "
                     f"mean_anchor_supports_per_neighbor="
@@ -798,7 +849,8 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                     f"biased_disp={biased_flat[representative_global].item():.6f}"
                 )
                 print(
-                    "neighbor offset shallow_cos refine_cos rgb_diff support "
+                    "neighbor offset shallow_cos refine_cos rgb_diff semantic "
+                    "aggregate_weight "
                     "raw_mlp gate anchor_target "
                     "pair_delta final_delta disp_before disp_after distance_before "
                     "distance_after attraction depth_before depth_after depth_delta anchors"
@@ -813,6 +865,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                         f"{pair_shallow_cosine[pair].item():.6f} "
                         f"{pair_refine_cosine[pair].item():.6f} "
                         f"{pair_rgb_difference[pair].item():.4f} "
+                        f"{pair_semantic[pair].item():.3f} "
                         f"{support[pair].item():.3f} "
                         f"{raw_proposal[pair].item():+.4f} "
                         f"{pair_gate[pair].item():.4f} "
