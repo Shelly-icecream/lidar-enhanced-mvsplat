@@ -8,6 +8,8 @@
 
 | 配置 | 作用 | 当前训练目标 |
 | --- | --- | --- |
+| `baseline.yaml` | 加载 RE10K checkpoint，关闭全部 LiDAR 分支 | 不训练额外模块，用于视觉模型直接推理 |
+| `re10k.yaml` | 加载 RE10K checkpoint 并启用 LiDAR depth bias | 两个 LiDAR adapter 均关闭，用于推理与消融 |
 | `stage1.yaml` | LiDAR 邻域深度修复 | 仅训练 `lidar_neighbor_depth_mlp` |
 | `stage2.yaml` | LiDAR Gaussian 属性修正 | 冻结 Stage 1，训练 Gaussian adapter |
 
@@ -140,9 +142,13 @@ dataset:
   dynamic_mask_min_depth: 0.01
 ```
 
+其中，`target.dynamic_mask` 由 target 时刻的 3D annotation 直接投影到
+target 相机生成，并非由 context mask 跨视角投影得到。
+
 生成的 `context.dynamic_mask` 和 `target.dynamic_mask` 用于：
 
-- 在数据加载阶段删除 context 与 target 动态区域内的 LiDAR depth/mask；
+- 在数据加载阶段删除 context 动态区域内的 LiDAR depth/mask；target
+  dynamic mask 不再生成对应的 LiDAR 张量；
 - 禁止动态像素成为 `lidar_neighbor_depth_mlp` 的 LiDAR anchor 或候选 neighbor；
 - 从 MSE、邻域深度 loss 和 Gaussian adapter loss 中排除动态 target 像素；
 - 在启用 context render loss 时，只监督静态 LiDAR 像素。
@@ -214,6 +220,20 @@ Stage 2 保持上述基础模块冻结，并额外冻结：
 
 ## 6. 测试与评测
 
+视觉模型 Baseline 关闭 LiDAR depth bias 和两个 LiDAR adapter，直接加载
+`re10k.ckpt` 推理：
+
+```bash
+python -m src.main \
+  +experiment=baseline \
+  mode=test \
+  checkpointing.load=checkpoints/re10k.ckpt \
+  checkpointing.resume=false \
+  dataset/view_sampler=evaluation \
+  test.compute_scores=true \
+  hydra.run.dir=outputs/baseline/inference
+```
+
 根据 checkpoint 所属阶段选择相同实验配置：
 
 ```bash
@@ -266,12 +286,12 @@ ls checkpoints/re10k.ckpt
 
 所有实验以 `re10k.ckpt` 为起点；PSNR/SSIM 越高越好，LPIPS 越低越好。
 
-| 实验 | LiDAR bias | Neighbor-depth adapter | Gaussian adapter | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ |
-| --- | :---: | :---: | :---: | --- | ---: | ---: | ---: |
-| Baseline | — | — | — | 无（直接推理） | **17.4256** | **0.4068** | **0.3872** |
-| Bias | ✓ | — | — | 无（直接推理） | 17.4115 | 0.3921 | 0.4138 |
-| Stage 1 | ✓ | ✓ | — | `lidar_neighbor_depth_mlp` | 17.3528 | 0.3757 | 0.4303 |
-| Stage 2 | ✓ | ✓（冻结） | ✓ | `depth_predictor.lidar_gaussian_adapter` | 17.4171 | 0.3800 | 0.4293 |
+| 实验 | LiDAR bias | Neighbor-depth adapter | Gaussian adapter | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | 推理展示（scene-0103） |
+| --- | :---: | :---: | :---: | --- | ---: | ---: | ---: | :---: |
+| Baseline | — | — | — | 无（直接推理） | **17.4256** | **0.4068** | **0.3872** | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
+| Bias | ✓ | — | — | 无（直接推理） | 17.4115 | 0.3921 | 0.4138 | <img src="outputs/test/re10k/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
+| Stage 1 | ✓ | ✓ | — | `lidar_neighbor_depth_mlp` | 17.3528 | 0.3757 | 0.4303 | <img src="outputs/test/stage1/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
+| Stage 2 | ✓ | ✓（冻结） | ✓ | `depth_predictor.lidar_gaussian_adapter` | 17.4171 | 0.3800 | 0.4293 | <img src="outputs/test/stage2/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
 
 ## 10. 致谢与引用
 

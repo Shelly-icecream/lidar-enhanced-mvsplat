@@ -1,6 +1,6 @@
 # @package _global_
-# Stage 2: load the stage-1 checkpoint, keep the neighbor-depth adapter
-# active but frozen, and train the LiDAR Gaussian adapter.
+# Visual-only baseline: load the pretrained RE10K checkpoint on nuScenes with
+# LiDAR depth bias and both LiDAR adapters disabled.
 defaults:
   - override /dataset: nuscenes
   - override /model/encoder: costvolume
@@ -8,8 +8,8 @@ defaults:
   - override /loss: [mse]
 
 wandb:
-  name: nuscenes_lidar_gaussian_adapter_stage2
-  tags: [nuscenes, lidar_bias, gaussian_adapter, stage2]
+  name: baseline
+  tags: [nuscenes, re10k, visual_only, baseline]
   mode: online
   entity: asdf5689-wuhan-university
 
@@ -17,28 +17,28 @@ data_loader:
   train:
     batch_size: 2
     num_workers: 0
-    persistent_workers: false   
+    persistent_workers: false
   test:
     batch_size: 1
     num_workers: 0
-    persistent_workers: false   
+    persistent_workers: false
   val:
-    batch_size: 1               
-    num_workers: 0              
-    persistent_workers: false   
+    batch_size: 1
+    num_workers: 0
+    persistent_workers: false
 
 trainer:
   max_steps: 2000
   limit_val_batches: 0
   num_sanity_val_steps: 0
-  gradient_clip_val: 0.5        
+  gradient_clip_val: 0.5
 
 # ----- model params -----
 model:
   encoder:
-    use_lidar_bias: true
+    use_lidar_bias: false
 
-    use_lidar_gaussian_neighbor_depth_adapter: true
+    use_lidar_gaussian_neighbor_depth_adapter: false
     use_lidar_gaussian_neighbor_depth_loss: false
     lidar_neighbor_depth_radius: 4
     lidar_neighbor_depth_topk: 64
@@ -60,8 +60,8 @@ model:
     lidar_neighbor_depth_attraction_weight: 1.0
     lidar_neighbor_depth_diagnostic_every_n_steps: 200
 
-    use_lidar_gaussian_adapter: true
-    use_lidar_gaussian_adapter_loss: true
+    use_lidar_gaussian_adapter: false
+    use_lidar_gaussian_adapter_loss: false
     lidar_gaussian_edit_xy: false
     lidar_gaussian_edit_scale: false
     lidar_gaussian_edit_rotation: false
@@ -75,7 +75,7 @@ model:
     lidar_gaussian_adapter_alpha_weight: 0.1
     lidar_gaussian_context_render_weight: 0.0
 
-    frozen_params: 
+    frozen_params:
       - backbone
       - depth_predictor.corr_refine_net
       - depth_predictor.regressor_residual
@@ -85,7 +85,7 @@ model:
       - depth_predictor.refine_unet
       - depth_predictor.to_disparity
       - depth_predictor.to_gaussians
-      - lidar_neighbor_depth_mlp
+      #- lidar_neighbor_depth_mlp
     lidar_gaussian_gate_kernel: 5
     lidar_lambda_surface: 10.0
     lidar_lambda_free: 2.0
@@ -105,8 +105,8 @@ model:
 # ----- optimizer / lr -----
 optimizer:
   lr: 1.0e-4
-  warm_up_steps: 500            
-  cosine_lr: true               
+  warm_up_steps: 500
+  cosine_lr: true
 
 # ----- dataset -----
 dataset:
@@ -128,16 +128,16 @@ dataset:
   num_context_views: 2
   num_target_views: 1
   frame_stride: 1
-  save_dynamic_diagnostics: true
+  save_dynamic_diagnostics: false
   dynamic_diagnostics_dir: outputs/dynamic_diagnostics
 
 train:
-  depth_mode: null              
-  extended_visualization: false 
-  print_log_every_n_steps: 50   
+  depth_mode: null
+  extended_visualization: false
+  print_log_every_n_steps: 50
 
 test:
-  output_path: outputs/test     
+  output_path: outputs/test
   eval_time_skip_steps: 5
   compute_scores: true
   save_image: true
@@ -145,8 +145,8 @@ test:
   save_lidar_alpha_diagnostics: false
 
 checkpointing:
-  load: checkpoints/stage1.ckpt
-  resume: false                           
-  every_n_train_steps: 200              
-  save_top_k: -1                          
+  load: checkpoints/re10k.ckpt
+  resume: false
+  every_n_train_steps: 200
+  save_top_k: -1
   pretrained_model: null

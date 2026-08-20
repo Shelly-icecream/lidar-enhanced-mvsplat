@@ -163,8 +163,13 @@ cython_debug/
 /datasets
 /dataset_cache
 
-# Outputs
-/outputs
+# Outputs (keep only the README inference examples tracked)
+/outputs/**
+!/outputs/**/
+!/outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png
+!/outputs/test/re10k/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png
+!/outputs/test/stage1/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png
+!/outputs/test/stage2/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png
 /lightning_logs
 /checkpoints
 

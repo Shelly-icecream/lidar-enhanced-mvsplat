@@ -482,11 +482,10 @@ class DatasetNuScenes(IterableDataset):
             camera_sd_tokens = []
             lidar_sd_tokens = []
 
-            for sample_token in sample_tokens:
+            for view_idx, sample_token in enumerate(sample_tokens):
                 sample = self.nusc.get("sample", sample_token)
 
                 cam_sd_token = sample["data"][self.cfg.camera_name]
-                lidar_sd_token = sample["data"]["LIDAR_TOP"]
 
                 img_tensor, c2w, K = self._load_camera(cam_sd_token)
 
@@ -495,7 +494,8 @@ class DatasetNuScenes(IterableDataset):
                 extrinsics_list.append(c2w)
 
                 camera_sd_tokens.append(cam_sd_token)
-                lidar_sd_tokens.append(lidar_sd_token)
+                if view_idx < len(context_sample_tokens):
+                    lidar_sd_tokens.append(sample["data"]["LIDAR_TOP"])
 
             images = torch.stack(image_tensors, dim=0)         # [v, 3, h, w]
             intrinsics = torch.stack(intrinsics_list, dim=0)   # [v, 3, 3]
@@ -607,35 +607,6 @@ class DatasetNuScenes(IterableDataset):
             example["context"]["lidar_mask"] = torch.stack(
                 context_lidar_masks, dim=0
             )  # [v,1,H,W]
-
-            # Project LiDAR into target views as well. These tensors are used
-            # only for target-space loss weighting and do not enter the
-            # encoder's context-side LiDAR branches.
-            target_lidar_depths = []
-            target_lidar_masks = []
-            for i, tgt_idx in enumerate(target_indices.tolist()):
-                H, W = example["target"]["image"][i].shape[-2:]
-                K_norm = example["target"]["intrinsics"][i]
-
-                lidar_depth, lidar_mask = self._project_lidar_to_camera(
-                    lidar_sd_token=lidar_sd_tokens[tgt_idx],
-                    camera_sd_token=camera_sd_tokens[tgt_idx],
-                    K_norm=K_norm,
-                    image_shape=(H, W),
-                )
-
-                static_mask = 1.0 - example["target"]["dynamic_mask"][i]
-                lidar_mask = lidar_mask * static_mask
-                lidar_depth = lidar_depth * lidar_mask
-                target_lidar_depths.append(lidar_depth)
-                target_lidar_masks.append(lidar_mask)
-
-            example["target"]["lidar_depth"] = torch.stack(
-                target_lidar_depths, dim=0
-            )
-            example["target"]["lidar_mask"] = torch.stack(
-                target_lidar_masks, dim=0
-            )
 
             if (
                 self.cfg.save_dynamic_diagnostics
