@@ -1,4 +1,6 @@
 # @package _global_
+# Stage 1: train the LiDAR Gaussian neighbor-depth adapter while the base
+# encoder and Gaussian prediction modules remain frozen.
 defaults:
   - override /dataset: nuscenes
   - override /model/encoder: costvolume
@@ -6,8 +8,8 @@ defaults:
   - override /loss: [mse]
 
 wandb:
-  name: nuscenes_lidar_bias
-  tags: [nuscenes, lidar_bias, lidar_refine]
+  name: nuscenes_lidar_neighbor_depth_stage1
+  tags: [nuscenes, lidar_bias, neighbor_depth, stage1]
   mode: online
   entity: asdf5689-wuhan-university
 
@@ -83,6 +85,7 @@ model:
       - depth_predictor.refine_unet
       - depth_predictor.to_disparity
       - depth_predictor.to_gaussians
+      #- lidar_neighbor_depth_mlp
     lidar_gaussian_gate_kernel: 5
     lidar_lambda_surface: 10.0
     lidar_lambda_free: 2.0

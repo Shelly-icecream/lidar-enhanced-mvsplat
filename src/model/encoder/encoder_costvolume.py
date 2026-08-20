@@ -418,6 +418,13 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             ).to(device=biased_disp.device)
             valid_anchor = valid_anchor & static_map
 
+        if not valid_anchor.any():
+            zero_link = (
+                next(self.lidar_neighbor_depth_mlp.parameters()).sum() * 0.0
+            )
+            zeros = biased_disp.new_zeros(biased_disp.shape) + zero_link
+            return zeros, zeros, zeros, zeros
+
         neighbor_valid = (
             static_map
             & ~lidar_mask_map
@@ -1074,7 +1081,10 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             gaussians.opacities = corrected_opacity
 
         neighbor_depth_base_gaussians = None
-        if neighbor_depth_base_depths is not None:
+        if (
+            neighbor_depth_base_depths is not None
+            and self.cfg.use_lidar_gaussian_neighbor_depth_loss
+        ):
             with torch.no_grad():
                 base_gaussian_depths = neighbor_depth_base_depths * ray_norm
                 neighbor_depth_base_gaussians = self.gaussian_adapter.forward(

@@ -651,16 +651,6 @@ class DepthPredictorMultiView(nn.Module):
                 "lidar_temperature must be positive, "
                 f"got {self.lidar_temperature}."
             )
-        # 用于统计整个测试集上的 LiDAR 三阶段误差
-        self.lidar_diag = {
-            "num_points": 0,
-            "vis_error_sum": 0.0,
-            "bias_error_sum": 0.0,
-            "refine_delta_sum": 0.0,
-            "refine_improve_count": 0,
-            "refine_worsen_count": 0,
-        }
-
         # Cost volume refinement: 2D U-Net
         input_channels = feature_channels if wo_cost_volume else (num_depth_candidates + feature_channels)
         channels = self.regressor_feat_dim
@@ -892,34 +882,17 @@ class DepthPredictorMultiView(nn.Module):
             raw_correlation = raw_correlation + self.regressor_residual(
                 raw_correlation_in
             )
-        depth_logits_vis = self.depth_head_lowres(raw_correlation)  
-        pdf_vis = F.softmax(depth_logits_vis, dim=1)
-        coarse_disps_vis = (disp_candi_curr * pdf_vis).sum(dim=1, keepdim=True)
-        has_lidar = lidar_depth is not None and lidar_mask is not None
-        need_lidar = has_lidar and self.use_lidar_bias
+        depth_logits = self.depth_head_lowres(raw_correlation)
 
-        # Keep the coarse/refinement path purely visual.  Valid full-resolution
+        # The coarse/refinement path is purely visual. Valid full-resolution
         # LiDAR samples are injected only into the final disparity below.
-        depth_logits_lidar = depth_logits_vis
-
-        # softmax to get coarse depth and density
-        pdf = F.softmax(depth_logits_lidar, dim=1)  # [v*b, D, h, w]
+        pdf = F.softmax(depth_logits, dim=1)  # [v*b, D, h, w]
         
         coarse_disps = (disp_candi_curr * pdf).sum(
             dim=1, keepdim=True
         )  # (vb, 1, h, w)
         pdf_max = torch.max(pdf, dim=1, keepdim=True)[0]  # argmax
         pdf_max = F.interpolate(pdf_max, scale_factor=self.upscale_factor)
-        visual_pdf_max = F.interpolate(
-            torch.max(pdf_vis, dim=1, keepdim=True)[0],
-            scale_factor=self.upscale_factor,
-        )
-        visual_fullres_disps = F.interpolate(
-            coarse_disps_vis,
-            scale_factor=self.upscale_factor,
-            mode="bilinear",
-            align_corners=True,
-        )
         fullres_disps = F.interpolate(
             coarse_disps,
             scale_factor=self.upscale_factor,
@@ -1118,89 +1091,6 @@ class DepthPredictorMultiView(nn.Module):
                     "refine_feature": refine_out.detach(),
                 }
 
-            # ============================================================
-            # LiDAR 三阶段误差诊断：
-            # 1. 纯视觉 coarse depth
-            # 2. 注入 LiDAR bias 后的 coarse depth
-            # 3. refinement U-Net 后的 final depth
-            # ============================================================
-            if (
-                need_lidar
-                and self.use_lidar_bias
-                and lidar_depth is not None
-                and lidar_mask is not None
-            ):
-                with torch.no_grad():
-                    if valid.any():
-                        lidar_disp_full = (
-                            1.0 / lidar_depth_full.clamp(min=1e-6)
-                        )
-
-                        # 纯视觉 coarse disparity 上采样到全分辨率
-                        visual_coarse_full = F.interpolate(
-                            coarse_disps_vis,
-                            size=fine_disps.shape[-2:],
-                            mode="bilinear",
-                            align_corners=True,
-                        )
-
-                        # fullres_disps 就是：
-                        # 注入 LiDAR bias 后的 coarse disparity 上采样结果
-                        biased_coarse_full = fullres_disps
-
-                        # 当前实验 gaussians_per_pixel=1
-                        # 若以后使用多个 surface，这里暂时统计第一个
-                        final_disp_for_diag = fine_disps[:, :1]
-
-                        # 三阶段逐像素误差
-                        visual_error_map = (
-                            visual_coarse_full - lidar_disp_full
-                        ).abs()
-
-                        bias_error_map = (
-                            biased_coarse_full - lidar_disp_full
-                        ).abs()
-
-                        final_error_map = (
-                            final_disp_for_diag - lidar_disp_full
-                        ).abs()
-
-                        # refinement 实际改动了多少
-                        refine_delta_map = (
-                            final_disp_for_diag - biased_coarse_full
-                        ).abs()
-
-                        visual_error = visual_error_map[valid]
-                        bias_error = bias_error_map[valid]
-                        final_error = final_error_map[valid]
-                        refine_delta = refine_delta_map[valid]
-
-                        num_points = int(valid.sum().item())
-
-                        # 累加整个测试集，而不是只看单个 batch
-                        self.lidar_diag["num_points"] += num_points
-
-                        self.lidar_diag["vis_error_sum"] += (
-                            visual_error.sum().item()
-                        )
-
-                        self.lidar_diag["bias_error_sum"] += (
-                            bias_error.sum().item()
-                        )
-
-                        self.lidar_diag["refine_delta_sum"] += (
-                            refine_delta.sum().item()
-                        )
-
-                        # refinement 后比 bias coarse 更接近 LiDAR
-                        self.lidar_diag["refine_improve_count"] += int(
-                            (final_error < bias_error).sum().item()
-                        )
-
-                        # refinement 后反而离 LiDAR 更远
-                        self.lidar_diag["refine_worsen_count"] += int(
-                            (final_error > bias_error).sum().item()
-                        )            
             depths = 1.0 / fine_disps
             depths = repeat(
                 depths,
