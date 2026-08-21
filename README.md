@@ -126,7 +126,7 @@ datasets/nuscenes/
 默认时序设置为：
 
 ```text
-context: [t-2, t-1]
+context: [t-1, t+1]
 target:  [t]
 camera:  CAM_FRONT
 ```
