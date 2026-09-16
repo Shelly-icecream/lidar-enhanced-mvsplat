@@ -194,6 +194,7 @@ frozen_params:
   - depth_predictor.refine_unet
   - depth_predictor.to_disparity
   - depth_predictor.to_gaussians
+  - depth_predictor.corr_project
 ```
 
 `lidar_neighbor_depth_mlp` 未列入冻结项，因此是该阶段的主要可训练模块。训练使用邻域 local RGB、相对 improvement、coverage、alpha under/over-worse 和 LiDAR attraction 等监督。
