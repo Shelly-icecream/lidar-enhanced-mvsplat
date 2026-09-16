@@ -194,7 +194,6 @@ frozen_params:
   - depth_predictor.refine_unet
   - depth_predictor.to_disparity
   - depth_predictor.to_gaussians
-  - depth_predictor.corr_project
 ```
 
 `lidar_neighbor_depth_mlp` 未列入冻结项，因此是该阶段的主要可训练模块。训练使用邻域 local RGB、相对 improvement、coverage、alpha under/over-worse 和 LiDAR attraction 等监督。
@@ -306,3 +305,14 @@ ls checkpoints/re10k.ckpt
   year    = {2024}
 }
 ```
+
+
+今天把context的mask也投影到target上去，让loss范围缩的更小
+1e-6训练2000 to disparity，把lpips关了 m.ckpt
+psnr 17.546709704708743
+ssim 0.41133324705161056
+lpips 0.3924104598435489
+没有变糊，感觉深度预测有一点点变准，但是有的地方可能被遮挡颜色不对？有个蓝色的车缺了车头
+要测一下到底是什么时候depth没预测准的，是不是refine unet的问题
+
+

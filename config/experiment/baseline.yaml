@@ -85,7 +85,6 @@ model:
       - depth_predictor.refine_unet
       - depth_predictor.to_disparity
       - depth_predictor.to_gaussians
-      - depth_predictor.corr_project
       #- lidar_neighbor_depth_mlp
     lidar_gaussian_gate_kernel: 5
     lidar_lambda_surface: 10.0

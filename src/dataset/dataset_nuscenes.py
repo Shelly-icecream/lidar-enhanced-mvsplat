@@ -571,10 +571,39 @@ class DatasetNuScenes(IterableDataset):
             example["context"]["dynamic_mask"] = torch.stack(
                 dynamic_masks[:num_context], dim=0
             )
-            example["target"]["dynamic_mask"] = torch.stack(
-                dynamic_masks[num_context:], dim=0
-            )
+            target_dynamic_masks = dynamic_masks[num_context:]
 
+            # A target pixel is unsafe for reconstruction supervision when a
+            # moving object occupies it at the target time or when a moving
+            # object from either context time projects there in the target
+            # camera.  Reproject the context-time 3D annotation boxes into
+            # every target view and take the union.  This conservatively masks
+            # temporal motion/occlusion regions instead of masking only the
+            # moving object's target-time location.
+            for target_idx in range(len(target_sample_tokens)):
+                target_camera_idx = num_context + target_idx
+                target_image = example["target"]["image"][target_idx]
+                target_height, target_width = target_image.shape[-2:]
+                target_camera_sd_token = camera_sd_tokens[target_camera_idx]
+                target_intrinsics = example["target"]["intrinsics"][target_idx]
+
+                union_mask = target_dynamic_masks[target_idx]
+                for context_sample_token in context_sample_tokens:
+                    context_mask_in_target = self._project_dynamic_mask_to_camera(
+                        sample_token=context_sample_token,
+                        camera_sd_token=target_camera_sd_token,
+                        K_norm=target_intrinsics,
+                        image_shape=(target_height, target_width),
+                    )
+                    union_mask = torch.maximum(
+                        union_mask,
+                        context_mask_in_target,
+                    )
+                target_dynamic_masks[target_idx] = union_mask
+
+            example["target"]["dynamic_mask"] = torch.stack(
+                target_dynamic_masks, dim=0
+            )
             # ===== 在 crop 之后生成 LiDAR depth / mask =====
             context_lidar_depths = []
             context_lidar_masks = []
