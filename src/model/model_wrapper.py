@@ -1018,6 +1018,14 @@ class ModelWrapper(LightningModule):
             )
 
     def on_test_end(self) -> None:
+        depth_predictor = getattr(self.encoder, "depth_predictor", None)
+        if (
+            depth_predictor is not None
+            and depth_predictor.print_lidar_depth_refine_diagnostics
+        ):
+            depth_predictor.print_lidar_depth_refine_diagnostics_summary()
+            depth_predictor.reset_lidar_depth_refine_diagnostics()
+
         name = get_cfg()["wandb"]["name"]
         out_dir = self.test_cfg.output_path / name
         saved_scores = {}

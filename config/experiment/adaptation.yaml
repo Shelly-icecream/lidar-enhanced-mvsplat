@@ -36,7 +36,7 @@ trainer:
 # ----- model params -----
 model:
   encoder:
-    use_lidar_bias: false
+    use_lidar_bias: true
 
     use_lidar_gaussian_neighbor_depth_adapter: false
     use_lidar_gaussian_neighbor_depth_loss: false
@@ -59,6 +59,8 @@ model:
     lidar_neighbor_depth_min_attraction: 0.4
     lidar_neighbor_depth_attraction_weight: 1.0
     lidar_neighbor_depth_diagnostic_every_n_steps: 200
+    # Print coarse/refined disparity errors at valid LiDAR pixels during inference.
+    print_lidar_depth_refine_diagnostics: false
 
     use_lidar_gaussian_adapter: false
     use_lidar_gaussian_adapter_loss: false

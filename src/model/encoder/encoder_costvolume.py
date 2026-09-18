@@ -115,6 +115,7 @@ class EncoderCostVolumeCfg:
     lidar_neighbor_depth_min_attraction: float
     lidar_neighbor_depth_attraction_weight: float
     lidar_neighbor_depth_diagnostic_every_n_steps: int
+    print_lidar_depth_refine_diagnostics: bool
     frozen_params: list[str]
     lidar_gaussian_gate_kernel: int
     lidar_lambda_surface: float
@@ -204,6 +205,9 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             lidar_free_margin=cfg.lidar_free_margin,
             lidar_temperature=cfg.lidar_temperature,
             lidar_gaussian_gate_kernel=cfg.lidar_gaussian_gate_kernel,
+            print_lidar_depth_refine_diagnostics=(
+                cfg.print_lidar_depth_refine_diagnostics
+            ),
         )
         self.lidar_neighbor_depth_mlp = None
         self.lidar_neighbor_depth_repair_enabled = bool(

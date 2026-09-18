@@ -78,6 +78,7 @@ lidar_neighbor_depth_alpha_tolerance: 0.02
 lidar_neighbor_depth_min_attraction: 0.1
 lidar_neighbor_depth_attraction_weight: 0.2
 lidar_neighbor_depth_diagnostic_every_n_steps: 100
+print_lidar_depth_refine_diagnostics: false
 frozen_params: []
 lidar_gaussian_gate_kernel: 5
 # LiDAR visibility prior params

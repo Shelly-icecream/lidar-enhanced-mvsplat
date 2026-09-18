@@ -612,6 +612,7 @@ class DepthPredictorMultiView(nn.Module):
         lidar_free_margin=0.5,
         lidar_temperature=5.0,
         lidar_gaussian_gate_kernel=5,
+        print_lidar_depth_refine_diagnostics=False,
         **kwargs,
     ):
         super(DepthPredictorMultiView, self).__init__()
@@ -644,6 +645,10 @@ class DepthPredictorMultiView(nn.Module):
         self.lidar_free_margin = lidar_free_margin
         self.lidar_temperature = lidar_temperature
         self.lidar_gaussian_gate_kernel = int(lidar_gaussian_gate_kernel)
+        self.print_lidar_depth_refine_diagnostics = bool(
+            print_lidar_depth_refine_diagnostics
+        )
+        self.reset_lidar_depth_refine_diagnostics()
         if self.lidar_gaussian_gate_kernel < 1 or self.lidar_gaussian_gate_kernel % 2 == 0:
             raise ValueError("lidar_gaussian_gate_kernel must be a positive odd integer.")
         if self.lidar_temperature <= 0:
@@ -1062,6 +1067,18 @@ class DepthPredictorMultiView(nn.Module):
                 max=disp_max,
             )
 
+            if (
+                self.print_lidar_depth_refine_diagnostics
+                and not self.training
+                and lidar_depth_full is not None
+            ):
+                self._print_lidar_depth_refine_diagnostics(
+                    fullres_disps[:, :1],
+                    visual_fine_disps[:, :1],
+                    lidar_depth_full,
+                    valid,
+                )
+
             # Inject LiDAR only after visual refinement.  A sample outside the
             # camera near/far disparity interval is rejected instead of being
             # clamped to a boundary and turned into a false hard anchor.
@@ -1105,4 +1122,112 @@ class DepthPredictorMultiView(nn.Module):
             densities,
             raw_gaussians,
             raw_gaussians_base,
+        )
+
+    @torch.no_grad()
+    def _print_lidar_depth_refine_diagnostics(
+        self,
+        fullres_disps,
+        visual_fine_disps,
+        lidar_depth,
+        valid_mask,
+        max_points=10,
+    ):
+        valid_indices = valid_mask[:, 0].nonzero(as_tuple=False)
+        valid_count = int(valid_indices.shape[0])
+        if valid_count == 0:
+            print("[Depth refine diagnostics] no valid LiDAR points")
+            return
+
+        lidar_disps = lidar_depth.clamp_min(1e-6).reciprocal()
+        valid = valid_mask[:, :1]
+        coarse_values = fullres_disps[valid]
+        refined_values = visual_fine_disps[valid]
+        lidar_values = lidar_disps[valid]
+        coarse_diffs = coarse_values - lidar_values
+        refined_diffs = refined_values - lidar_values
+        coarse_mean_abs_error = coarse_diffs.abs().mean().item()
+        refined_mean_abs_error = refined_diffs.abs().mean().item()
+        self._lidar_depth_refine_coarse_abs_error_sum += (
+            coarse_diffs.abs().sum().item()
+        )
+        self._lidar_depth_refine_refined_abs_error_sum += (
+            refined_diffs.abs().sum().item()
+        )
+        self._lidar_depth_refine_valid_count += valid_count
+        if refined_mean_abs_error < coarse_mean_abs_error:
+            mean_change = "smaller"
+        elif refined_mean_abs_error > coarse_mean_abs_error:
+            mean_change = "larger"
+        else:
+            mean_change = "unchanged"
+
+        print(
+            "[Depth refine diagnostics] "
+            f"valid_lidar_points={valid_count}, "
+            f"mean_fullres_disp={coarse_values.mean().item():.6f}, "
+            f"mean_lidar_disp={lidar_values.mean().item():.6f}, "
+            f"mean_fullres_diff={coarse_diffs.mean().item():+.6f}, "
+            f"mean_abs_fullres_diff={coarse_mean_abs_error:.6f}, "
+            f"mean_visual_fine_disp={refined_values.mean().item():.6f}, "
+            f"mean_visual_fine_diff={refined_diffs.mean().item():+.6f}, "
+            f"mean_abs_visual_fine_diff={refined_mean_abs_error:.6f}, "
+            f"mean_abs_error_change={mean_change}"
+        )
+        print(
+            "[Depth refine diagnostics] points: "
+            "index=(view_batch,y,x), fullres_disp, lidar_disp, fullres_diff, "
+            "visual_fine_disp, visual_fine_diff, abs_error_change"
+        )
+        for index in valid_indices[:max_points]:
+            vb, y, x = (int(value) for value in index.tolist())
+            coarse = fullres_disps[vb, 0, y, x].item()
+            refined = visual_fine_disps[vb, 0, y, x].item()
+            lidar = lidar_disps[vb, 0, y, x].item()
+            coarse_diff = coarse - lidar
+            refined_diff = refined - lidar
+            coarse_error = abs(coarse_diff)
+            refined_error = abs(refined_diff)
+            if refined_error < coarse_error:
+                change = "smaller"
+            elif refined_error > coarse_error:
+                change = "larger"
+            else:
+                change = "unchanged"
+            print(
+                "  "
+                f"index=({vb},{y},{x}) "
+                f"fullres_disp={coarse:.6f} "
+                f"lidar_disp={lidar:.6f} "
+                f"fullres_diff={coarse_diff:+.6f} "
+                f"visual_fine_disp={refined:.6f} "
+                f"visual_fine_diff={refined_diff:+.6f} "
+                f"abs_error_change={change}"
+            )
+
+    def reset_lidar_depth_refine_diagnostics(self):
+        self._lidar_depth_refine_coarse_abs_error_sum = 0.0
+        self._lidar_depth_refine_refined_abs_error_sum = 0.0
+        self._lidar_depth_refine_valid_count = 0
+
+    def print_lidar_depth_refine_diagnostics_summary(self):
+        count = self._lidar_depth_refine_valid_count
+        if count == 0:
+            print("[Depth refine diagnostics summary] no valid LiDAR points")
+            return
+
+        coarse_mean = self._lidar_depth_refine_coarse_abs_error_sum / count
+        refined_mean = self._lidar_depth_refine_refined_abs_error_sum / count
+        if refined_mean < coarse_mean:
+            change = "smaller"
+        elif refined_mean > coarse_mean:
+            change = "larger"
+        else:
+            change = "unchanged"
+        print(
+            "[Depth refine diagnostics summary] "
+            f"valid_lidar_points={count}, "
+            f"refine_before_mean_abs_disp_diff={coarse_mean:.6f}, "
+            f"refine_after_mean_abs_disp_diff={refined_mean:.6f}, "
+            f"abs_error_change={change}"
         )
