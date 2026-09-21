@@ -36,7 +36,7 @@ trainer:
 # ----- model params -----
 model:
   encoder:
-    use_lidar_bias: false
+    use_lidar_bias: true
 
     use_lidar_gaussian_neighbor_depth_adapter: false
     use_lidar_gaussian_neighbor_depth_loss: false
@@ -83,7 +83,8 @@ model:
       - depth_predictor.upsampler
       - depth_predictor.proj_feature
       - depth_predictor.refine_unet
-      #- depth_predictor.to_disparity
+      #- depth_predictor.to_disparity_disps
+      - depth_predictor.to_disparity_opacity
       - depth_predictor.to_gaussians
       #- lidar_neighbor_depth_mlp
     lidar_gaussian_gate_kernel: 5

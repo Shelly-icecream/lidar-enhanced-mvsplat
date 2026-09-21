@@ -154,310 +154,6 @@ class LidarGaussianCrossAttention(nn.Module):
                 output[batch_index].flatten(1)[:, chunk_indices] = chunk_output.transpose(0, 1)
         return output
 
-def build_lidar_surface_prior(
-    disp_candi_curr,
-    lidar_disp_low,
-    lidar_mask_low,
-    sigma_disp,
-    eps=1e-6,
-):
-    """Build the shared LiDAR response over inverse-depth candidates."""
-    if sigma_disp <= 0:
-        raise ValueError(
-            f"sigma_disp must be positive, got {sigma_disp}."
-        )
-
-    surface_prior = torch.exp(
-        -0.5
-        * (
-            (disp_candi_curr - lidar_disp_low)
-            / max(float(sigma_disp), eps)
-        ).square()
-    )
-    return surface_prior * lidar_mask_low
-
-
-def build_lidar_visibility_prior(
-    lidar_depth,
-    lidar_mask,
-    disp_candi_curr,
-    target_hw,
-    visual_depth_logits=None,
-    lambda_surface=10.0,
-    lambda_free=2.0,
-    sigma_disp=0.32,
-    free_margin=0.5,
-    eps=1e-6,
-):
-    """
-    Args:
-        lidar_depth:
-            [B, V, 1, H, W]，LiDAR 物理深度，单位为米。
-        lidar_mask:
-            [B, V, 1, H, W]，LiDAR 有效掩码。
-        disp_candi_curr:
-            [V*B, D, 1, 1]，逆深度候选。
-        target_hw:
-            (Hf, Wf)，与低分辨率 depth logits 相同。
-
-    Returns:
-        lidar_bias:
-            [V*B, D, Hf, Wf]
-        lidar_mask_low:
-            [V*B, 1, Hf, Wf]
-        lidar_disp_low:
-            [V*B, 1, Hf, Wf]
-    """
-
-    lidar_depth = lidar_depth.to(
-        device=disp_candi_curr.device,
-        dtype=disp_candi_curr.dtype,
-    )
-
-    lidar_mask = lidar_mask.to(
-        device=disp_candi_curr.device,
-        dtype=disp_candi_curr.dtype,
-    )
-
-    Hf, Wf = target_hw
-
-    # [B,V,1,H,W] -> [V*B,1,H,W]
-    lidar_depth = rearrange(
-        lidar_depth,
-        "b v c h w -> (v b) c h w",
-    )
-
-    lidar_mask = rearrange(
-        lidar_mask,
-        "b v c h w -> (v b) c h w",
-    )
-
-    H, W = lidar_depth.shape[-2:]
-
-    assert H % Hf == 0, (
-        f"LiDAR height {H} cannot be evenly downsampled to {Hf}"
-    )
-    assert W % Wf == 0, (
-        f"LiDAR width {W} cannot be evenly downsampled to {Wf}"
-    )
-
-    scale_h = H // Hf
-    scale_w = W // Wf
-
-    kernel_size = (scale_h, scale_w)
-    stride = (scale_h, scale_w)
-
-    # 有效 LiDAR 点
-    valid_mask = (
-        (lidar_mask > 0.5)
-        & torch.isfinite(lidar_depth)
-        & (lidar_depth > eps)
-    )
-
-    valid_mask_float = valid_mask.to(
-        dtype=lidar_depth.dtype
-    )
-
-    # 原分辨率逆深度，无效像素置零
-    lidar_disp = torch.where(
-        valid_mask,
-        1.0 / lidar_depth.clamp(min=eps),
-        torch.zeros_like(lidar_depth),
-    )
-
-    # 区块内只要有点，低分辨率位置就有效
-    lidar_mask_low = F.max_pool2d(
-        valid_mask_float,
-        kernel_size=kernel_size,
-        stride=stride,
-    )
-
-    lidar_mask_low = (
-        lidar_mask_low > 0.5
-    ).to(dtype=lidar_depth.dtype)
-
-    # 最大逆深度对应最近点
-    lidar_disp_low = F.max_pool2d(
-        lidar_disp,
-        kernel_size=kernel_size,
-        stride=stride,
-    )
-    # Fraction of valid LiDAR pixels in each low-resolution cell.
-    lidar_cell_density = F.avg_pool2d(
-        valid_mask_float,
-        kernel_size=kernel_size,
-        stride=stride,
-    )
-
-    # 还原物理深度，供自由空间项使用
-    lidar_depth_low = torch.where(
-        lidar_mask_low > 0.5,
-        1.0 / lidar_disp_low.clamp(min=eps),
-        torch.zeros_like(lidar_disp_low),
-    )
-    # Condition the two analytic-prior strengths on inverse depth. Normalizing
-    # against the current candidate range keeps the input stable across near/far
-    # settings. The predicted log offsets are bounded to a 1/4x--4x multiplier.
-    disp_min = disp_candi_curr.amin(dim=1, keepdim=True)
-    disp_max = disp_candi_curr.amax(dim=1, keepdim=True)
-    normalized_lidar_disp = (
-        (lidar_disp_low - disp_min)
-        / (disp_max - disp_min).clamp(min=eps)
-    ).clamp(0.0, 1.0)
-    
-    
-    disp_range = (disp_max - disp_min).clamp(min=eps)
-
-    normalized_entropy = torch.zeros_like(lidar_disp_low)
-    normalized_residual = torch.zeros_like(lidar_disp_low)
-    local_density = torch.zeros_like(lidar_disp_low)
-
-    if visual_depth_logits is not None:
-        # Visual statistics describe the actual coarse distribution (T=1).
-        # Detaching prevents auxiliary statistics from changing the visual
-        # predictor merely to manipulate uncertainty. Analytic-bias
-        # temperature calibration is applied separately at the fusion site.
-        visual_pdf = F.softmax(
-            visual_depth_logits.detach(),
-            dim=1,
-        )
-        visual_expected_disp = (
-            visual_pdf * disp_candi_curr
-        ).sum(dim=1, keepdim=True)
-        entropy = -(
-            visual_pdf * visual_pdf.clamp_min(eps).log()
-        ).sum(dim=1, keepdim=True)
-        normalized_entropy = entropy / math.log(visual_pdf.shape[1])
-
-        top2 = visual_pdf.topk(k=2, dim=1).values
-        inverse_margin = 1.0 - (top2[:, :1] - top2[:, 1:2])
-
-        visual_variance = (
-            visual_pdf
-            * (disp_candi_curr - visual_expected_disp).square()
-        ).sum(dim=1, keepdim=True)
-        normalized_visual_std = (
-            visual_variance.clamp_min(0.0).sqrt() / disp_range
-        ).clamp(0.0, 1.0)
-
-        local_density = F.avg_pool2d(
-            lidar_cell_density,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-        neighbor_disp_sum = F.avg_pool2d(
-            lidar_disp_low,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-        neighbor_count = F.avg_pool2d(
-            lidar_mask_low,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-        )
-        neighbor_disp_mean = (
-            neighbor_disp_sum / neighbor_count.clamp_min(eps)
-        )
-        local_disp_disagreement = (
-            (lidar_disp_low - neighbor_disp_mean).abs() / disp_range
-        ).clamp(0.0, 1.0)
-        normalized_residual = (
-            (visual_expected_disp - lidar_disp_low).abs() / disp_range
-        ).clamp(0.0, 1.0)
-    lambda_surface_map = torch.full_like(
-        lidar_disp_low, float(lambda_surface)
-    )
-    lambda_free_map = torch.full_like(
-        lidar_disp_low, float(lambda_free)
-    )
-        
-    # 可选：第一次调用时打印统计量
-    if not getattr(
-        build_lidar_visibility_prior,
-        "_printed_downsample_statistics",
-        False,
-    ):
-        with torch.no_grad():
-            original_count = (
-                valid_mask_float.flatten(1).sum(dim=1)
-            )
-
-            lowres_count = (
-                lidar_mask_low.flatten(1).sum(dim=1)
-            )
-
-            point_to_cell_ratio = (
-                lowres_count
-                / original_count.clamp(min=1)
-            )
-
-            coverage_ratio = (
-                lowres_count
-                / float(Hf * Wf)
-            )
-
-            print(
-                "[LiDAR Aggregation] "
-                f"input_shape={tuple(lidar_depth.shape)}, "
-                f"lowres_shape={tuple(lidar_mask_low.shape)}, "
-                f"scale=({scale_h},{scale_w}), "
-                f"original_per_view="
-                f"{original_count.detach().cpu().tolist()}, "
-                f"lowres_per_view="
-                f"{lowres_count.detach().cpu().tolist()}, "
-                f"point_to_cell_ratio="
-                f"{point_to_cell_ratio.detach().cpu().tolist()}, "
-                f"coverage_per_view="
-                f"{coverage_ratio.detach().cpu().tolist()}"
-            )
-
-        build_lidar_visibility_prior._printed_downsample_statistics = True
-
-    # 候选逆深度 [V*B,D,1,1]
-    disp_candi = disp_candi_curr
-
-    # 候选物理深度 [V*B,D,1,1]
-    depth_candi = 1.0 / disp_candi.clamp(min=eps)
-
-    # LiDAR 表面吸引项
-    surface_prior = build_lidar_surface_prior(
-        disp_candi_curr=disp_candi,
-        lidar_disp_low=lidar_disp_low,
-        lidar_mask_low=lidar_mask_low,
-        sigma_disp=sigma_disp,
-        eps=eps,
-    )
-
-    # LiDAR 表面前方的自由空间抑制项
-    free_prior = (
-        depth_candi
-        < (lidar_depth_low - free_margin)
-    ).to(dtype=lidar_depth.dtype)
-
-    free_prior = (
-        free_prior * lidar_mask_low
-    )
-
-    lidar_bias = (
-        lambda_surface_map * surface_prior
-        - lambda_free_map * free_prior
-    )
-
-    return (
-        lidar_bias,
-        lidar_mask_low,
-        lidar_disp_low,
-        lambda_surface_map,
-        lambda_free_map,
-        normalized_entropy,
-        normalized_residual,
-        local_density,
-        surface_prior,
-    )
-
 def warp_with_pose_depth_candidates(
     feature1,
     intrinsics,
@@ -520,7 +216,6 @@ def warp_with_pose_depth_candidates(
 
     return warped_feature
 
-
 def prepare_feat_proj_data_lists(
     features, intrinsics, extrinsics, near, far, num_samples
 ):
@@ -572,7 +267,6 @@ def prepare_feat_proj_data_lists(
     ).type_as(features)
     depth_candi_curr = repeat(depth_candi_curr, "vb d -> vb d () ()")  # [vxb, d, 1, 1]
     return feat_lists, intr_curr, pose_curr_lists, depth_candi_curr
-
 
 class DepthPredictorMultiView(nn.Module):
     """IMPORTANT: this model is in (v b), NOT (b v), due to some historical issues.
@@ -796,16 +490,26 @@ class DepthPredictorMultiView(nn.Module):
                 )
             self.register_buffer("lidar_gaussian_editable_channels", editable)
 
-        # Gaussians prediction: centers, opacity
+        # Gaussians prediction: centers
         if not wo_depth_refine:
             channels = depth_unet_feat_dim
             disps_models = [
                 nn.Conv2d(channels, channels * 2, 3, 1, 1),
                 nn.GELU(),
-                nn.Conv2d(channels * 2, gaussians_per_pixel * 2, 3, 1, 1),
+                nn.Conv2d(channels * 2, gaussians_per_pixel, 3, 1, 1),
             ]
-            self.to_disparity = nn.Sequential(*disps_models)
+            self.to_disparity_disps = nn.Sequential(*disps_models)
 
+        # Gaussians prediction: opacity
+        if not wo_depth_refine:
+            channels = depth_unet_feat_dim
+            opacity_models = [
+                nn.Conv2d(channels, channels * 2, 3, 1, 1),
+                nn.GELU(),
+                nn.Conv2d(channels * 2, gaussians_per_pixel, 3, 1, 1),
+            ]
+            self.to_disparity_opacity = nn.Sequential(*opacity_models)
+            
     def forward(
         self,
         features,
@@ -1018,10 +722,8 @@ class DepthPredictorMultiView(nn.Module):
             )
         else:
             # delta fine depth and density
-            delta_disps_density = self.to_disparity(refine_out)
-            delta_disps, raw_densities = delta_disps_density.split(
-                gaussians_per_pixel, dim=1
-            )
+            delta_disps = self.to_disparity_disps(refine_out)
+            raw_densities = self.to_disparity_opacity(refine_out)
 
             # combine coarse and fine info and match shape
             densities = repeat(

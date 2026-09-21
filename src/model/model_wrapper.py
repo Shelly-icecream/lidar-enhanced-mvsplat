@@ -1339,3 +1339,29 @@ class ModelWrapper(LightningModule):
                 "frequency": 1,
             },
         }
+    
+    @classmethod
+    def load_split_checkpoint(cls, checkpoint_path, k, **model_kwargs):
+        model=cls(**model_kwargs)
+        checkpoint = torch.load(checkpoint_path,map_location="cpu")
+        state = checkpoint["state_dict"].copy()
+        prefix="encoder.depth_predictor."
+        old = prefix + "to_disparity."
+        
+        has_old_head = any(name.startswith(old) for name in state)
+        if not has_old_head:
+            model.load_state_dict(state, strict=True)
+            return model
+        
+        depth =prefix + "to_disparity_disps."
+        opacity = prefix + "to_disparity_opacity."
+        for param in ("weight","bias"):
+            first = state.pop(old + "0." + param)
+            last = state.pop(old + "2." + param)
+            assert last.shape[0] == 2*k
+            state[depth + "0." + param] = first.clone()
+            state[depth+"2."+param] =last[:k].clone()
+            state[opacity+"0."+param] = first.clone()
+            state[opacity+"2."+param] = last[k:].clone()
+        model.load_state_dict(state, strict=True)
+        return model

@@ -4,7 +4,7 @@
 
 ## 1. 当前进度
 
-目前仓库包含以下可运行配置：
+目前仓库包含以下实验配置（旧配置的冻结前缀迁移见下文）：
 
 | 配置 | 作用 | 当前训练目标 |
 | --- | --- | --- |
@@ -12,6 +12,9 @@
 | `re10k.yaml` | 加载 RE10K checkpoint 并启用 LiDAR depth bias | 两个 LiDAR adapter 均关闭，用于推理与消融 |
 | `stage1.yaml` | LiDAR 邻域深度修复 | 仅训练 `lidar_neighbor_depth_mlp` |
 | `stage2.yaml` | LiDAR Gaussian 属性修正 | 冻结 Stage 1，训练 Gaussian adapter |
+| `adaptation.yaml` | 双头拆分后的深度微调，开启 LiDAR bias、关闭两个 adapter | 仅训练 `depth_predictor.to_disparity_disps`，冻结 opacity 头 |
+
+注意：`baseline/re10k/stage1/stage2.yaml` 当前仍保留旧冻结项 `depth_predictor.to_disparity`。使用这些配置前，需要将该项替换为 `depth_predictor.to_disparity_disps` 和 `depth_predictor.to_disparity_opacity`，否则 encoder 初始化的严格前缀检查会报错。
 
 已经完成的主要改动：
 
@@ -23,6 +26,9 @@
 - 新增邻域深度和 Gaussian adapter 的专用训练损失、alpha 改善指标及动态诊断输出；
 - Gaussian 中心深度统一由 camera z-depth 转换为沿射线距离，并使用预测的 sub-pixel offset 计算对应射线；
 - 增加严格的 `frozen_params` 前缀检查，避免配置写错后意外训练基础网络。
+- 将旧 `to_disparity` 拆为逆深度修正头 `to_disparity_disps` 和 density 头 `to_disparity_opacity`，各输出 `K = gaussians_per_pixel` 个通道，可分别冻结和训练；
+- 新增 `ModelWrapper.load_split_checkpoint`：两个头复制旧第一层，最后一层分别取旧输出的前、后 K 个通道；新双头 checkpoint 直接加载。微调和测试入口均支持迁移，测试不再重复加载原始旧文件；
+- target 动态 mask 合并 target 时刻与各 context 时刻动态物体 3D 框在 target 相机中的投影，进一步排除时序运动和遮挡区域的监督。
 
 当前阶段仍以 `v1.0-mini`、`176 × 320` 分辨率和 2000 steps 配置进行开发验证；正式结论应在 trainval split、更长训练和统一 checkpoint 条件下复现。
 
@@ -51,8 +57,11 @@ flowchart TD
     PF --> RU
     CD --> RU
 
-    RU --> TD[depth_predictor.to_disparity]
+    RU --> TD[depth_predictor.to_disparity_disps]
     TD --> VD[视觉 refined disparity]
+    RU --> OP[depth_predictor.to_disparity_opacity]
+    OP --> DENS[density → opacity]
+    DENS --> GCV
     LIDAR -. 合法点转 disparity .-> BIAS[LiDAR hard-anchor bias]
     VD --> BIAS
     BIAS --> BD[biased disparity]
@@ -85,7 +94,7 @@ flowchart TD
     class GA stage2;
 ```
 
-说明：`to_gaussians` 预测几何/颜色原始参数，`to_disparity` 预测 full-resolution disparity residual 与 density。邻域 MLP 只修改深度；Stage 2 adapter 默认只修改 LiDAR 像素处的 SH DC 和 opacity，不修改 xy、scale、rotation 或其余 SH 系数。RGB 图像本身不会被 dynamic mask 擦除，因此 backbone 和 cost volume 仍能看到完整画面；mask 只约束 LiDAR、邻域传播与损失的有效区域。
+说明：`to_gaussians` 预测几何/颜色原始参数，`to_disparity_disps` 预测 full-resolution disparity residual，`to_disparity_opacity` 预测 density 原始值，再经 sigmoid 与 opacity 映射。中心位置还依赖像素偏移和相机参数。两个头共享 refinement 特征；单独训练一个头时，需冻结共享网络才能避免另一头的输入随训练改变。邻域 MLP 只修改深度；Stage 2 adapter 默认只修改 LiDAR 像素处的 SH DC 和 opacity，不修改 xy、scale、rotation 或其余 SH 系数。RGB 图像本身不会被 dynamic mask 擦除，因此 backbone 和 cost volume 仍能看到完整画面；mask 只约束 LiDAR、邻域传播与损失的有效区域。
 
 ## 3. 环境安装
 
@@ -142,8 +151,7 @@ dataset:
   dynamic_mask_min_depth: 0.01
 ```
 
-其中，`target.dynamic_mask` 由 target 时刻的 3D annotation 直接投影到
-target 相机生成，并非由 context mask 跨视角投影得到。
+其中，`target.dynamic_mask` 是 target 时刻与各 context 时刻动态物体 3D annotation 在 target 相机中的投影并集。这里重新投影的是各时刻的 3D 框，并非直接 warp context 的二维 mask。
 
 生成的 `context.dynamic_mask` 和 `target.dynamic_mask` 用于：
 
@@ -192,7 +200,8 @@ frozen_params:
   - depth_predictor.upsampler
   - depth_predictor.proj_feature
   - depth_predictor.refine_unet
-  - depth_predictor.to_disparity
+  - depth_predictor.to_disparity_disps
+  - depth_predictor.to_disparity_opacity
   - depth_predictor.to_gaussians
 ```
 
@@ -217,6 +226,18 @@ Stage 2 保持上述基础模块冻结，并额外冻结：
 ```
 
 此时邻域深度修复仍参与前向计算，但只训练 `depth_predictor.lidar_gaussian_adapter`。当前配置允许它修正 `SH DC + opacity`，并在非 LiDAR 像素的最终写入边界保持原始 Gaussian 参数不变。
+
+### 5.3 Adaptation：只微调逆深度头
+
+```bash
+python -m src.main \
+  +experiment=adaptation \
+  mode=train \
+  checkpointing.load=checkpoints/re10k.ckpt \
+  checkpointing.resume=false
+```
+
+当前配置使用学习率 `1e-6`、2000 steps、MSE 监督（LPIPS 权重为 0），冻结 backbone、refinement、opacity 头和 `to_gaussians`。开启 LiDAR hard-anchor bias，两个 LiDAR adapter 均关闭。旧单头权重会自动拆分；新双头权重再次微调时直接加载。`resume=true` 用于恢复结构与配置匹配的新双头训练 checkpoint，不用于迁移旧单头优化器状态。
 
 ## 6. 测试与评测
 
@@ -284,14 +305,18 @@ ls checkpoints/re10k.ckpt
 
 ## 9. 实验记录
 
-所有实验以 `re10k.ckpt` 为起点；PSNR/SSIM 越高越好，LPIPS 越低越好。
+以下分数来自本地 `outputs/test/<实验>/scores_all_avg.json`；PSNR/SSIM 越高越好，LPIPS 越低越好。
 
 | 实验 | LiDAR bias | Neighbor-depth adapter | Gaussian adapter | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | 推理展示（scene-0103） |
 | --- | :---: | :---: | :---: | --- | ---: | ---: | ---: | :---: |
-| Baseline | — | — | — | 无（直接推理） | **17.4256** | **0.4068** | **0.3872** | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
+| Baseline | — | — | — | 无（直接推理） | 17.4256 | 0.4068 | **0.3872** | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
+| Baseline2(loss无lpips) | — | — | — | `depth_predictor.to_disparity_disps` | **17.4921** | **0.4098** | 0.3918 | <img src="outputs/test/baseline2/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
 | Bias | ✓ | — | — | 无（直接推理） | 17.4115 | 0.3921 | 0.4138 | <img src="outputs/test/re10k/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
+| Bias2(loss无lpips) | ✓ | — | — | `depth_predictor.to_disparity_disps` | 17.4868 | 0.3946 | 0.4207 | <img src="outputs/test/bias2/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
 | Stage 1 | ✓ | ✓ | — | `lidar_neighbor_depth_mlp` | 17.3528 | 0.3757 | 0.4303 | <img src="outputs/test/stage1/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
 | Stage 2 | ✓ | ✓（冻结） | ✓ | `depth_predictor.lidar_gaussian_adapter` | 17.4171 | 0.3800 | 0.4293 | <img src="outputs/test/stage2/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
+
+
 
 ## 10. 致谢与引用
 
@@ -305,14 +330,3 @@ ls checkpoints/re10k.ckpt
   year    = {2024}
 }
 ```
-
-
-今天把context的mask也投影到target上去，让loss范围缩的更小
-1e-6训练2000 to disparity，把lpips关了 m.ckpt
-psnr 17.546709704708743
-ssim 0.41133324705161056
-lpips 0.3924104598435489
-没有变糊，感觉深度预测有一点点变准，但是有的地方可能被遮挡颜色不对？有个蓝色的车缺了车头
-要测一下到底是什么时候depth没预测准的，是不是refine unet的问题
-
-
