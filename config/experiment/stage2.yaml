@@ -42,9 +42,9 @@ model:
     use_lidar_gaussian_adapter_loss: true
     lidar_gaussian_edit_xy: false
     lidar_gaussian_edit_scale: false
-    lidar_gaussian_edit_rotation: false
+    lidar_gaussian_edit_rotation: true
     lidar_gaussian_edit_sh_dc: true
-    lidar_gaussian_edit_sh_rest: false
+    lidar_gaussian_edit_sh_rest: true
     lidar_gaussian_edit_opacity: false
     lidar_gaussian_opacity_max_delta_logit: 1.0
     lidar_gaussian_adapter_local_rgb_weight: 1.0
