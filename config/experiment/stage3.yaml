@@ -37,62 +37,11 @@ trainer:
 model:
   encoder:
     use_lidar_bias: true
-
-    use_lidar_gaussian_neighbor_depth_adapter: false
-    use_lidar_gaussian_neighbor_depth_loss: false
-    lidar_neighbor_depth_radius: 4
-    lidar_neighbor_depth_topk: 64
-    lidar_neighbor_depth_min_neighbors_before_gap: 4
-    lidar_neighbor_depth_min_log_score_gap: 0.4
-    lidar_neighbor_depth_max_relative_ref_disparity_error: 0.05
-    lidar_neighbor_depth_reference_bound_margin: 0.02
-    lidar_neighbor_depth_min_shallow_cosine: 0.85
-    lidar_neighbor_depth_min_refine_cosine: 0.9
-    lidar_neighbor_depth_max_rgb_difference: 0.12
-    lidar_neighbor_depth_max_gate: 1.0
-    lidar_neighbor_depth_target_disagreement_scale: 0.2
-    lidar_neighbor_depth_local_rgb_weight: 0.1
-    lidar_neighbor_depth_improvement_weight: 1.0
-    lidar_neighbor_depth_coverage_weight: 1.0
-    lidar_neighbor_depth_over_alpha_worse_weight: 0.5
-    lidar_neighbor_depth_alpha_tolerance: 0.02
-    lidar_neighbor_depth_min_attraction: 0.4
-    lidar_neighbor_depth_attraction_weight: 1.0
-    lidar_neighbor_depth_diagnostic_every_n_steps: 200
+    split_depth_attribute_branches: true
 
     use_lidar_gaussian_adapter: false
     use_lidar_gaussian_adapter_loss: false
-    lidar_gaussian_edit_xy: false
-    lidar_gaussian_edit_scale: false
-    lidar_gaussian_edit_rotation: false
-    lidar_gaussian_edit_sh_dc: true
-    lidar_gaussian_edit_sh_rest: false
-    lidar_gaussian_edit_opacity: true
-    lidar_gaussian_opacity_max_delta_logit: 1.0
-    lidar_gaussian_adapter_local_rgb_weight: 1.0
-    lidar_gaussian_adapter_improvement_weight: 1.0
-    lidar_gaussian_adapter_improvement_margin: 0.0
-    lidar_gaussian_adapter_alpha_weight: 0.1
-    lidar_gaussian_context_render_weight: 0.0
 
-    frozen_params:
-      - backbone
-      - depth_predictor.corr_refine_net
-      - depth_predictor.regressor_residual
-      - depth_predictor.depth_head_lowres
-      - depth_predictor.upsampler
-      - depth_predictor.proj_feature
-      - depth_predictor.refine_unet
-      #- depth_predictor.to_disparity_disps
-      - depth_predictor.to_disparity_opacity
-      - depth_predictor.to_gaussians
-      #- lidar_neighbor_depth_mlp
-    lidar_gaussian_gate_kernel: 5
-    lidar_lambda_surface: 10.0
-    lidar_lambda_free: 2.0
-    lidar_sigma_disp: 0.01
-    lidar_free_margin: 0.5
-    lidar_temperature: 5.0
     num_depth_candidates: 128
     costvolume_unet_feat_dim: 128
     costvolume_unet_channel_mult: [1, 1, 1]
@@ -103,14 +52,32 @@ model:
     depth_unet_channel_mult: [1, 1, 1, 1, 1]
     unimatch_weights_path: null
 
+    frozen_params:
+      - backbone
+      - depth_predictor.corr_refine_net
+      - depth_predictor.regressor_residual
+      - depth_predictor.depth_head_lowres_attributes
+      #- depth_predictor.depth_head_lowres
+      - depth_predictor.upsampler
+      - depth_predictor.proj_feature
+      - depth_predictor.refine_unet_attributes
+      #- depth_predictor.refine_unet
+      #- depth_predictor.to_disparity_disps
+      - depth_predictor.to_disparity_opacity
+      - depth_predictor.to_gaussians
+
 loss:
+  gradient:
+    weight: 0.05
+  lidar_depth:
+    weight: 1.0
   lpips:
     apply_after_step: 0
-    weight: 0.00
+    weight: 0.05
 
 # ----- optimizer / lr -----
 optimizer:
-  lr: 1.0e-6
+  lr: 1.0e-5
   warm_up_steps: 500
   cosine_lr: true
 

@@ -1,4 +1,5 @@
 import math
+from copy import deepcopy
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -300,11 +301,6 @@ class DepthPredictorMultiView(nn.Module):
         lidar_gaussian_edit_sh_rest=False,
         lidar_gaussian_edit_opacity=False,
         lidar_gaussian_opacity_max_delta_logit=1.0,
-        lidar_lambda_surface=10.0,
-        lidar_lambda_free=2.0,
-        lidar_sigma_disp=0.12,
-        lidar_free_margin=0.5,
-        lidar_temperature=5.0,
         lidar_gaussian_gate_kernel=5,
         **kwargs,
     ):
@@ -320,8 +316,6 @@ class DepthPredictorMultiView(nn.Module):
         # Table 3: w/o U-Net
         self.wo_cost_volume_refine = wo_cost_volume_refine
         self.use_lidar_bias = use_lidar_bias
-        self.compute_lidar_depth_repair_aux = False
-        self.lidar_depth_repair_aux = None
         self.use_lidar_gaussian_adapter = use_lidar_gaussian_adapter
         self.lidar_gaussian_edit_xy = bool(lidar_gaussian_edit_xy)
         self.lidar_gaussian_edit_scale = bool(lidar_gaussian_edit_scale)
@@ -332,19 +326,9 @@ class DepthPredictorMultiView(nn.Module):
         self.lidar_gaussian_opacity_max_delta_logit = float(
             lidar_gaussian_opacity_max_delta_logit
         )
-        self.lidar_lambda_surface = lidar_lambda_surface
-        self.lidar_lambda_free = lidar_lambda_free
-        self.lidar_sigma_disp = lidar_sigma_disp
-        self.lidar_free_margin = lidar_free_margin
-        self.lidar_temperature = lidar_temperature
         self.lidar_gaussian_gate_kernel = int(lidar_gaussian_gate_kernel)
         if self.lidar_gaussian_gate_kernel < 1 or self.lidar_gaussian_gate_kernel % 2 == 0:
             raise ValueError("lidar_gaussian_gate_kernel must be a positive odd integer.")
-        if self.lidar_temperature <= 0:
-            raise ValueError(
-                "lidar_temperature must be positive, "
-                f"got {self.lidar_temperature}."
-            )
         # Cost volume refinement: 2D U-Net
         input_channels = feature_channels if wo_cost_volume else (num_depth_candidates + feature_channels)
         channels = self.regressor_feat_dim
@@ -510,6 +494,76 @@ class DepthPredictorMultiView(nn.Module):
             ]
             self.to_disparity_opacity = nn.Sequential(*opacity_models)
             
+    def enable_split_depth_attribute_branches(self):
+        if self.wo_depth_refine:
+            raise ValueError("Split depth/attribute branches require depth refinement.")
+        self.depth_head_lowres_attributes = deepcopy(self.depth_head_lowres)
+        self.refine_unet_attributes = deepcopy(self.refine_unet)
+        for module in (self.depth_head_lowres_attributes, self.refine_unet_attributes):
+            module.requires_grad_(False)
+            module.eval()
+
+    def train(self, mode=True):
+        super().train(mode)
+        if hasattr(self, "depth_head_lowres_attributes"):
+            self.depth_head_lowres_attributes.eval()
+            self.refine_unet_attributes.eval()
+        return self
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        # Legacy checkpoints have one branch. Seed both branches from its
+        # pretrained tensors, not from the random initialization-time copy.
+        if hasattr(self, "depth_head_lowres_attributes"):
+            for name in ("depth_head_lowres", "refine_unet"):
+                target = prefix + name + "_attributes."
+                if not any(key.startswith(target) for key in state_dict):
+                    source = prefix + name + "."
+                    for key, value in list(state_dict.items()):
+                        if key.startswith(source):
+                            state_dict[target + key[len(source):]] = value.clone()
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs,
+        )
+
+    @torch.no_grad()
+    def _attribute_refine_features(self, correlation, candidates, images, features):
+        pdf = self.depth_head_lowres_attributes(correlation).softmax(dim=1)
+        disparity = (candidates * pdf).sum(dim=1, keepdim=True)
+        disparity = F.interpolate(disparity, scale_factor=self.upscale_factor,
+                                  mode="bilinear", align_corners=True)
+        confidence = F.interpolate(pdf.max(dim=1, keepdim=True)[0],
+                                   scale_factor=self.upscale_factor)
+        return self.refine_unet_attributes(
+            torch.cat((images, features, disparity, confidence), dim=1)
+        )
+
+    @torch.no_grad()
+    def _print_lidar_disparity_stats(self, visual_disps, lidar_disps, valid):
+        # Give every valid LiDAR pixel equal weight across all input views and
+        # batch items. Average Gaussian depth samples within a pixel first.
+        pixel_error = (visual_disps.detach().float() - lidar_disps.float()).mean(dim=1, keepdim=True)
+        errors = pixel_error[valid]
+        count = errors.numel()
+        if count == 0:
+            print("[LiDAR disparity] valid_pixels=0; no statistics", flush=True)
+            return
+        mean, mae, larger, smaller = torch.stack([
+            errors.mean(),
+            errors.abs().mean(),
+            (errors > 0).float().mean(),
+            (errors < 0).float().mean(),
+        ]).tolist()
+        direction = "larger" if mean > 0 else "smaller" if mean < 0 else "equal"
+        print(
+            f"[LiDAR disparity] bias_enabled={self.use_lidar_bias} "
+            f"valid_pixels={count} pred_minus_lidar_mean={mean:+.8f} "
+            f"mean_absolute_error={mae:.8f} prediction={direction} "
+            f"pred_larger={larger:.2%} pred_smaller={smaller:.2%}",
+            flush=True,
+        )
+
     def forward(
         self,
         features,
@@ -527,7 +581,6 @@ class DepthPredictorMultiView(nn.Module):
         """IMPORTANT: this model is in (v b), NOT (b v), due to some historical issues.
         keep this in mind when performing any operation related to the view dim"""
         extra_info = {} if extra_info is None else extra_info
-        self.lidar_depth_repair_aux = None
         
         # format the input
         b, v, c, h, w = features.shape
@@ -617,8 +670,14 @@ class DepthPredictorMultiView(nn.Module):
             dim=1,
         ))
 
-        # gaussians head
-        raw_gaussians_in = [refine_out,
+        attribute_refine_out = refine_out
+        if hasattr(self, "depth_head_lowres_attributes"):
+            attribute_refine_out = self._attribute_refine_features(
+                raw_correlation, disp_candi_curr, extra_info["images"], proj_feature
+            )
+
+        # Attribute heads consume only the frozen reference branch when split.
+        raw_gaussians_in = [attribute_refine_out,
                             extra_info["images"], proj_feat_in_fullres]
         raw_gaussians_in = torch.cat(raw_gaussians_in, dim=1)
         raw_gaussians = self.to_gaussians(raw_gaussians_in)
@@ -690,7 +749,8 @@ class DepthPredictorMultiView(nn.Module):
                 srf=1,
             )
             final_disps = fullres_disps
-            if self.use_lidar_bias and lidar_depth is not None and lidar_mask is not None:
+            self.visual_disparity = fullres_disps
+            if lidar_depth is not None and lidar_mask is not None:
                 lidar_depth_full = rearrange(
                     lidar_depth, "b v c h w -> (v b) c h w"
                 ).to(device=final_disps.device, dtype=final_disps.dtype)
@@ -711,7 +771,9 @@ class DepthPredictorMultiView(nn.Module):
                     & (lidar_disp_full >= disp_min)
                     & (lidar_disp_full <= disp_max)
                 )
-                final_disps = torch.where(valid, lidar_disp_full, final_disps)
+                self._print_lidar_disparity_stats(final_disps, lidar_disp_full, valid)
+                if self.use_lidar_bias:
+                    final_disps = torch.where(valid, lidar_disp_full, final_disps)
             depths = 1.0 / final_disps
             depths = repeat(
                 depths,
@@ -723,7 +785,7 @@ class DepthPredictorMultiView(nn.Module):
         else:
             # delta fine depth and density
             delta_disps = self.to_disparity_disps(refine_out)
-            raw_densities = self.to_disparity_opacity(refine_out)
+            raw_densities = self.to_disparity_opacity(attribute_refine_out)
 
             # combine coarse and fine info and match shape
             densities = repeat(
@@ -759,7 +821,10 @@ class DepthPredictorMultiView(nn.Module):
                     & (lidar_depth_full > 1e-6)
                 )
 
-            visual_fine_disps = (fullres_disps + delta_disps).clamp(
+            # Supervise the raw prediction so out-of-range values retain
+            # corrective gradients; rendering still uses bounded disparity.
+            self.visual_disparity = fullres_disps + delta_disps
+            visual_fine_disps = self.visual_disparity.clamp(
                 min=disp_min,
                 max=disp_max,
             )
@@ -767,31 +832,22 @@ class DepthPredictorMultiView(nn.Module):
             # Inject LiDAR only after visual refinement.  A sample outside the
             # camera near/far disparity interval is rejected instead of being
             # clamped to a boundary and turned into a false hard anchor.
-            if self.use_lidar_bias and valid is not None:
+            if valid is not None:
                 lidar_disp_full = lidar_depth_full.clamp_min(1e-6).reciprocal()
                 valid = (
                     valid
                     & (lidar_disp_full >= disp_min)
                     & (lidar_disp_full <= disp_max)
                 )
-                fine_disps = torch.where(
-                    valid,
-                    lidar_disp_full,
-                    visual_fine_disps,
+                self._print_lidar_disparity_stats(
+                    visual_fine_disps, lidar_disp_full, valid
+                )
+                fine_disps = (
+                    torch.where(valid, lidar_disp_full, visual_fine_disps)
+                    if self.use_lidar_bias else visual_fine_disps
                 )
             else:
                 fine_disps = visual_fine_disps
-
-            self.lidar_depth_repair_aux = None
-            if self.compute_lidar_depth_repair_aux:
-                # The visual refinement is now shared exactly.  Only the final
-                # disparity at a valid LiDAR pixel differs from this reference.
-                self.lidar_depth_repair_aux = {
-                    "reference_disparity": visual_fine_disps[:, :1].detach(),
-                    "biased_disparity": fine_disps[:, :1].detach(),
-                    "shallow_feature": proj_feat_in_fullres.detach(),
-                    "refine_feature": refine_out.detach(),
-                }
 
             depths = 1.0 / fine_disps
             depths = repeat(
