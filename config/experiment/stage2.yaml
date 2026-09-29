@@ -10,7 +10,6 @@ wandb:
   name: nuscenes_lidar_gaussian_adapter_stage2
   tags: [nuscenes, lidar_bias, gaussian_adapter, stage2]
   mode: disabled
-  entity: asdf5689-wuhan-university
 
 data_loader:
   train:

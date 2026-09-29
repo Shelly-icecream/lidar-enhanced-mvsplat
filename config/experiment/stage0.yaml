@@ -11,7 +11,6 @@ wandb:
   name: nuscenes_lidar_bias_pre_adapter
   tags: [nuscenes, re10k, lidar_bias, pre_adapter]
   mode: online
-  entity: asdf5689-wuhan-university
 
 data_loader:
   train:
