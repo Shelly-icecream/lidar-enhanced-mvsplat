@@ -58,6 +58,9 @@ class EncoderCostVolumeCfg:
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
+    use_lidar_bias: bool = False
+    use_lidar_bias_train: bool | None = None
+    use_lidar_bias_eval: bool | None = None
 
 
 class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
@@ -174,6 +177,18 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         extra_info = {}
         extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
         extra_info["scene_names"] = scene_names
+        lidar_bias = (
+            self.cfg.use_lidar_bias_train if self.training
+            else self.cfg.use_lidar_bias_eval
+        )
+        if lidar_bias is None:
+            stage_cfg = get_cfg().get("train" if self.training else "test", {})
+            lidar_bias = stage_cfg.get("use_lidar_bias", self.cfg.use_lidar_bias)
+        if lidar_bias:
+            for key in ("lidar_depth", "lidar_mask"):
+                if key not in context:
+                    raise ValueError(f"LiDAR hard-anchor bias requires context[{key!r}]")
+                extra_info[key] = rearrange(context[key], "b v c h w -> (v b) c h w")
         gpp = self.cfg.gaussians_per_pixel
         depths, densities, raw_gaussians = self.depth_predictor(
             in_feats,

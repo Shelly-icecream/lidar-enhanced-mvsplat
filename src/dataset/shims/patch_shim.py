@@ -20,8 +20,14 @@ def apply_patch_shim_to_views(views: BatchedViews, patch_size: int) -> BatchedVi
     intrinsics[:, :, 0, 0] *= w / w_new  # fx
     intrinsics[:, :, 1, 1] *= h / h_new  # fy
 
+    lidar = {
+        key: views[key][..., row : row + h_new, col : col + w_new]
+        for key in ("lidar_depth", "lidar_mask")
+        if key in views
+    }
     return {
         **views,
+        **lidar,
         "image": image,
         "intrinsics": intrinsics,
     }

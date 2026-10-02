@@ -1,0 +1,17 @@
+# @package _global_
+defaults:
+  - baseline
+
+wandb:
+  name: lidar_hard_anchor
+  tags: [nuscenes, re10k, lidar_hard_anchor]
+
+model:
+  encoder:
+    use_lidar_bias: true
+
+train:
+  use_lidar_bias: true
+
+test:
+  use_lidar_bias: true

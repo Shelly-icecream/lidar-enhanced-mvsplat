@@ -7,6 +7,19 @@ from ..backbone.unimatch.geometry import coords_grid
 from .ldm_unet.unet import UNetModel
 
 
+def apply_lidar_hard_anchor(disparities, lidar_depth, lidar_mask):
+    """Replace inverse depth only at valid, aligned sparse LiDAR pixels."""
+    expected_shape = (disparities.shape[0], 1, *disparities.shape[-2:])
+    if lidar_depth.shape != expected_shape or lidar_mask.shape != expected_shape:
+        raise ValueError("LiDAR depth/mask must have shape [v*b, 1, H, W] matching disparity")
+    lidar_depth = lidar_depth.to(disparities)
+    lidar_mask = lidar_mask.to(device=disparities.device)
+    valid = (lidar_mask > 0.5) & torch.isfinite(lidar_depth) & (lidar_depth > 0)
+    # Avoid division by zero/NaN even in the unselected branch of torch.where.
+    lidar_disparities = torch.where(valid, lidar_depth, torch.ones_like(lidar_depth)).reciprocal()
+    return torch.where(valid, lidar_disparities, disparities)
+
+
 def warp_with_pose_depth_candidates(
     feature1,
     intrinsics,
@@ -367,14 +380,7 @@ class DepthPredictorMultiView(nn.Module):
                 v=v,
                 srf=1,
             )
-            depths = 1.0 / fullres_disps
-            depths = repeat(
-                depths,
-                "(v b) dpt h w -> b v (h w) srf dpt",
-                b=b,
-                v=v,
-                srf=1,
-            )
+            fine_disps = fullres_disps
         else:
             # delta fine depth and density
             delta_disps_density = self.to_disparity(refine_out)
@@ -395,13 +401,17 @@ class DepthPredictorMultiView(nn.Module):
                 1.0 / rearrange(far, "b v -> (v b) () () ()"),
                 1.0 / rearrange(near, "b v -> (v b) () () ()"),
             )
-            depths = 1.0 / fine_disps
-            depths = repeat(
-                depths,
-                "(v b) dpt h w -> b v (h w) srf dpt",
-                b=b,
-                v=v,
-                srf=1,
+        # RGB cost volume and refinement finish before sparse hard anchoring.
+        if "lidar_depth" in extra_info:
+            fine_disps = apply_lidar_hard_anchor(
+                fine_disps, extra_info["lidar_depth"], extra_info["lidar_mask"]
             )
+        depths = repeat(
+            1.0 / fine_disps,
+            "(v b) dpt h w -> b v (h w) srf dpt",
+            b=b,
+            v=v,
+            srf=1,
+        )
 
         return depths, densities, raw_gaussians
