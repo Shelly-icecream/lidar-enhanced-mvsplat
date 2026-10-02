@@ -1,57 +1,43 @@
 # @package _global_
-# Stage 2: train the LiDAR Gaussian adapter with the base encoder frozen.
+# Stage6: preserve Stage3 geometry; train only the independent SH branch.
 defaults:
   - override /dataset: nuscenes
   - override /model/encoder: costvolume
-  # Keep a typed-config placeholder. Adapter-loss mode skips this global loss.
-  - override /loss: [mse]
+  - override /loss: [mse, gradient, lpips]
 
 wandb:
-  name: nuscenes_lidar_gaussian_adapter_stage2
-  tags: [nuscenes, lidar_bias, gaussian_adapter, stage2]
+  name: stage6
+  tags: [nuscenes, stage6, sh_only]
   mode: disabled
 
 data_loader:
   train:
     batch_size: 2
     num_workers: 0
-    persistent_workers: false   
+    persistent_workers: false
   test:
     batch_size: 1
     num_workers: 0
-    persistent_workers: false   
+    persistent_workers: false
   val:
-    batch_size: 1               
-    num_workers: 0              
-    persistent_workers: false   
+    batch_size: 1
+    num_workers: 0
+    persistent_workers: false
 
 trainer:
-  max_steps: 2000
+  max_steps: 1000
   limit_val_batches: 0
   num_sanity_val_steps: 0
-  gradient_clip_val: 0.5        
+  gradient_clip_val: 0.5
 
 # ----- model params -----
 model:
   encoder:
-
     split_depth_attribute_branches: true
+    split_gaussian_sh: true
 
-    use_lidar_gaussian_adapter: true
-    use_lidar_gaussian_adapter_loss: true
-    lidar_gaussian_edit_xy: false
-    lidar_gaussian_edit_scale: false
-    lidar_gaussian_edit_rotation: true
-    lidar_gaussian_edit_sh_dc: true
-    lidar_gaussian_edit_sh_rest: true
-    lidar_gaussian_edit_opacity: false
-    lidar_gaussian_opacity_max_delta_logit: 1.0
-    lidar_gaussian_adapter_local_rgb_weight: 1.0
-    lidar_gaussian_adapter_improvement_weight: 1.0
-    lidar_gaussian_adapter_improvement_margin: 0.0
-    lidar_gaussian_adapter_alpha_weight: 0.1
-    lidar_gaussian_context_render_weight: 0.0
-    lidar_gaussian_gate_kernel: 5
+    use_lidar_gaussian_adapter: false
+    use_lidar_gaussian_adapter_loss: false
 
     num_depth_candidates: 128
     costvolume_unet_feat_dim: 128
@@ -63,7 +49,7 @@ model:
     depth_unet_channel_mult: [1, 1, 1, 1, 1]
     unimatch_weights_path: null
 
-    frozen_params: 
+    frozen_params:
       - backbone
       - depth_predictor.corr_refine_net
       - depth_predictor.regressor_residual
@@ -75,16 +61,33 @@ model:
       - depth_predictor.refine_unet
       - depth_predictor.to_disparity_disps
       - depth_predictor.to_disparity_opacity
-      - depth_predictor.to_gaussians
+      - depth_predictor.to_gaussians.geometry
+      #- depth_predictor.to_gaussians.sh
+
+loss:
+  # 结构约束
+  gradient:
+    weight: 0.05
+    context_structure_weight: 0.04
+  lpips:
+    apply_after_step: 0
+    weight: 0.05
+  
+  # 颜色约束
+  mse:
+    weight: 1.0
+    context_color_weight: 0.8
 
 # ----- optimizer / lr -----
 optimizer:
   lr: 1.0e-4
-  warm_up_steps: 500            
-  cosine_lr: true               
+  warm_up_steps: 500
+  cosine_lr: true
 
 # ----- dataset -----
 dataset:
+  cross_lidar_abs_tol: 1.0
+  cross_lidar_rel_tol: 0.05
   image_shape: [176, 320]
   root: datasets/nuscenes
   version: v1.0-mini
@@ -106,13 +109,14 @@ dataset:
 
 train:
   use_lidar_bias: true
-  depth_mode: null              
-  extended_visualization: false 
-  print_log_every_n_steps: 50   
+  enable_depth_losses: false
+  depth_mode: null
+  extended_visualization: false
+  print_log_every_n_steps: 50
 
 test:
-  use_lidar_bias: true
-  output_path: outputs/test     
+  use_lidar_bias: false
+  output_path: outputs/test
   eval_time_skip_steps: 5
   compute_scores: true
   save_image: true
@@ -120,8 +124,8 @@ test:
   save_lidar_alpha_diagnostics: false
 
 checkpointing:
-  load: checkpoints/stage3.ckpt
-  resume: false                           
-  every_n_train_steps: 200              
-  save_top_k: -1                          
+  load: checkpoints/stage5-v2.ckpt
+  resume: false
+  every_n_train_steps: 200
+  save_top_k: -1
   pretrained_model: null

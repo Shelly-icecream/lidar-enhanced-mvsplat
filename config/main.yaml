@@ -48,11 +48,14 @@ checkpointing:
   resume: true
 
 train:
+  use_lidar_bias: null  # 未指定时兼容旧 encoder 配置
+  enable_depth_losses: false
   depth_mode: null
   extended_visualization: false
   print_log_every_n_steps: 1
 
 test:
+  use_lidar_bias: null  # 验证、测试和推理
   output_path: outputs/test
   compute_scores: false
   eval_time_skip_steps: 0

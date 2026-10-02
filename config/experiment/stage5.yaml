@@ -35,8 +35,8 @@ trainer:
 # ----- model params -----
 model:
   encoder:
-    use_lidar_bias: true
     split_depth_attribute_branches: true
+    split_gaussian_sh: false
 
     use_lidar_gaussian_adapter: false
     use_lidar_gaussian_adapter_loss: false
@@ -66,22 +66,42 @@ model:
       - depth_predictor.to_gaussians
 
 loss:
-  gradient:
-    weight: 0.05
+  # 深度约束
+  cross_visual_depth:
+    print_every_n_steps: 50
+    color_threshold: 0.1  # mean absolute RGB difference, images in [0,1]
+    weight: 1.0
+    samples: 5000
+    beta: 0.01
+    reprojection_threshold_px: 1.0
+    relative_depth_threshold: 0.05
+  cross_lidar_depth:
+    weight: 1.0
+    beta: 0.01
   lidar_depth:
     weight: 1.0
+  
+  # 结构约束
+  gradient:
+    weight: 0.05
   lpips:
     apply_after_step: 0
     weight: 0.05
+  
+  # 颜色约束
+  mse:
+    weight: 1.0
 
 # ----- optimizer / lr -----
 optimizer:
-  lr: 1.0e-5
+  lr: 1.0e-4
   warm_up_steps: 500
   cosine_lr: true
 
 # ----- dataset -----
 dataset:
+  cross_lidar_abs_tol: 1.0
+  cross_lidar_rel_tol: 0.05
   image_shape: [176, 320]
   root: datasets/nuscenes
   version: v1.0-mini
@@ -100,15 +120,16 @@ dataset:
   num_context_views: 2
   num_target_views: 1
   frame_stride: 1
-  save_dynamic_diagnostics: false
-  dynamic_diagnostics_dir: outputs/dynamic_diagnostics
 
 train:
+  use_lidar_bias: true
+  enable_depth_losses: true
   depth_mode: null
   extended_visualization: false
   print_log_every_n_steps: 50
 
 test:
+  use_lidar_bias: false
   output_path: outputs/test
   eval_time_skip_steps: 5
   compute_scores: true

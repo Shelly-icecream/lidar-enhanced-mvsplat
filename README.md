@@ -168,14 +168,6 @@ dataset:
 - 从 MSE 和 Gaussian adapter loss 中排除动态 target 像素；
 - 在启用 context render loss 时，只监督静态 LiDAR 像素。
 
-可用以下配置保存一次对齐诊断，包括红色 dynamic mask、过滤前 LiDAR 和过滤后 LiDAR：
-
-```yaml
-dataset:
-  save_dynamic_diagnostics: true
-  dynamic_diagnostics_dir: outputs/dynamic_diagnostics
-```
-
 从 [MVSplat 官方仓库](https://github.com/donydchen/mvsplat)下载 RE10K 预训练模型并保存为：
 
 ```text
@@ -284,8 +276,8 @@ PSNR/SSIM 越高越好，LPIPS 越低越好。
 | --- | :---: | :---: | --- | ---: | ---: | ---: | :---: |
 | Baseline | — | — | 无（直接推理） | 17.4256 | **0.4068** | **0.3872** | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
 | Bias | ✓ | — | 无（直接推理） | 17.4115 | 0.3921 | 0.4138 | <img src="outputs/test/re10k/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
-| Stage 3 | ✓ | — | `depth_predictor.depth_head_lowres,refine_unet,to_disparity_disps` | 17.5172 | 0.3905 | 0.4198 | <img src="outputs/test/stage3/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
-| Stage 2 | ✓ | ✓ | `depth_predictor.lidar_gaussian_adapter` | **17.5519** | 0.3900 | 0.4193 | <img src="outputs/test/stage2-v3/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
+| Stage 3 | ✓ | — | `depth_predictor.depth_head_lowres,refine_unet,to_disparity_disps` | **17.6212** | 0.3975 | 0.4141 | <img src="outputs/test/stage3-8000/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
+| Stage 2-v3 | ✓ | ✓ | `depth_predictor.lidar_gaussian_adapter` | 17.5519 | 0.3900 | 0.4193 | <img src="outputs/test/stage2-v3/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
 
 
 
@@ -303,4 +295,47 @@ PSNR/SSIM 越高越好，LPIPS 越低越好。
 ```
 
 
+v2
+psnr 17.475660262169775
+ssim 0.38809252114264997
+lpips 0.42160927823611666
+v1
+17.5172
+0.3905
+0.4198
 
+stage5-v2
+psnr 17.670995588426464
+ssim 0.39989208633249457
+lpips 0.41357617757537146
+
+## Stage6：固定几何，训练 SH 颜色
+
+`config/experiment/stage6.yaml` 将 `to_gaussians` 切成独立的 `geometry` 和
+`sh` 两个卷积分支。只训练 `depth_predictor.to_gaussians.sh`（全部 SH 系数），
+其余参数冻结。加载旧的联合头权重时自动复制首层并按输出通道切分末层，
+保持初始预测；Stage6 检查点推理也应使用 Stage6 配置。
+
+同一组联合高斯既渲染到 target，也渲染回全部 context 相机。
+两组图像均使用 MSE 颜色约束（权重 1.0）和图像梯度结构约束（权重 0.05），
+排除动态 mask；context 监督覆盖所有静态像素，不限于 LiDAR 点。
+不启用深度损失。结构约束指 RGB 相邻像素梯度匹配，并非深度平面约束。
+
+```bash
+python -m src.main +experiment=stage6 checkpointing.load=checkpoints/stage3.ckpt
+```
+
+也可将加载路径换成 `checkpoints/stage5-v2.ckpt`。默认学习率为 `1e-5`。
+`loss.context_color_weight` 与 `loss.context_structure_weight` 控制新增的
+context 监督，其他阶段默认均为 0，保留原训练行为。
+
+深度损失统一由 `train.enable_depth_losses` 控制，默认关闭，仅 Stage3 默认开启。
+关闭时直接跳过 `cross_visual_depth`、`cross_lidar_depth`、`lidar_depth` 的
+forward 和诊断计算，不影响 MSE、结构约束和 context 重建。
+此开关同时控制跨视图 LiDAR 标签生成；开启时自动补齐未配置的三项深度损失，
+已有损失参数保持不变。Stage6 默认关闭。临时关闭可使用 `train.enable_depth_losses=false`。
+
+LiDAR bias 可分别设置 `train.use_lidar_bias`（训练）和
+`test.use_lidar_bias`（验证、测试、推理）。Stage6 两项默认均为
+`true`，保持原行为；其他配置未指定时沿用旧的 `use_lidar_bias`。
+模型通过 `train()` / `eval()` 自动选择，不受参数是否冻结影响。

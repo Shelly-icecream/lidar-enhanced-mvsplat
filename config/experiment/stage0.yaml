@@ -35,8 +35,6 @@ trainer:
 # ----- model params -----
 model:
   encoder:
-    use_lidar_bias: true
-
     use_lidar_gaussian_adapter: false
     use_lidar_gaussian_adapter_loss: false
 
@@ -87,15 +85,15 @@ dataset:
   num_context_views: 2
   num_target_views: 1
   frame_stride: 1
-  save_dynamic_diagnostics: true
-  dynamic_diagnostics_dir: outputs/dynamic_diagnostics
 
 train:
+  use_lidar_bias: false
   depth_mode: null              
   extended_visualization: false 
   print_log_every_n_steps: 50   
 
 test:
+  use_lidar_bias: true
   output_path: outputs/test     
   eval_time_skip_steps: 5
   compute_scores: true

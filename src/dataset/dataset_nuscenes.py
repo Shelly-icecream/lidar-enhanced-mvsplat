@@ -1,10 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 import torch
 import torchvision.transforms as tf
-from torchvision.utils import save_image
 from PIL import Image
 from torch import Tensor
 from torch.utils.data import IterableDataset
@@ -20,6 +19,7 @@ from .types import Stage
 from .view_sampler import ViewSampler
 import numpy as np
 from nuscenes.utils.data_classes import LidarPointCloud
+from nuscenes.utils.geometry_utils import points_in_box
 
 
 DYNAMIC_ATTRIBUTES = {
@@ -48,8 +48,10 @@ class DatasetNuScenesCfg(DatasetCfgCommon):
     dynamic_mask_expansion_ratio: float = 0.15
     dynamic_mask_min_padding_px: int = 8
     dynamic_mask_min_depth: float = 0.01
-    save_dynamic_diagnostics: bool = False
-    dynamic_diagnostics_dir: Path = Path("outputs/dynamic_diagnostics")
+    # Internal runtime value derived solely from train.enable_depth_losses.
+    _prepare_depth_labels: bool = field(default=False, init=False, repr=False)
+    cross_lidar_abs_tol: float = 1.0
+    cross_lidar_rel_tol: float = 0.05
 
 
 class DatasetNuScenes(IterableDataset):
@@ -80,7 +82,6 @@ class DatasetNuScenes(IterableDataset):
             for attribute in self.nusc.attribute
             if attribute["name"] in DYNAMIC_ATTRIBUTES
         }
-        self._dynamic_diagnostic_saved = False
 
         self.items = self._build_index()
 
@@ -94,6 +95,7 @@ class DatasetNuScenes(IterableDataset):
         camera_sd_token: str,
         K_norm: Tensor,
         image_shape: tuple[int, int],
+        static_sample_token: str | None = None,
     ) -> tuple[Tensor, Tensor]:
         """
     Project LIDAR_TOP points to the given camera image plane.
@@ -154,6 +156,14 @@ class DatasetNuScenes(IterableDataset):
 
         # lidar -> world
         T_lidar_to_world = T_ego_to_world_lidar @ T_lidar_to_ego
+        if static_sample_token is not None:
+            world = (T_lidar_to_world[:3, :3] @ pts.T + T_lidar_to_world[:3, 3:4]).numpy()
+            keep = np.ones(pts.shape[0], dtype=bool)
+            for token in self.nusc.get("sample", static_sample_token)["anns"]:
+                ann = self.nusc.get("sample_annotation", token)
+                if set(ann["attribute_tokens"]) & self.dynamic_attribute_tokens:
+                    keep &= ~points_in_box(self.nusc.get_box(token), world, wlh_factor=1.1)
+            pts = pts[torch.from_numpy(keep)]
         # world -> camera
         T_world_to_cam = self._invert_transform(T_ego_to_world_cam @ T_cam_to_ego)
 
@@ -301,53 +311,6 @@ class DatasetNuScenes(IterableDataset):
                 dynamic_mask[:, y0:y1, x0:x1] = 1.0
 
         return dynamic_mask
-
-    def _save_dynamic_diagnostics(
-        self,
-        image: Tensor,
-        dynamic_mask: Tensor,
-        raw_lidar_mask: Tensor,
-        filtered_lidar_mask: Tensor,
-        sample_token: str,
-        camera_sd_token: str,
-    ) -> None:
-        """Save three aligned overlays and print filtering statistics."""
-        output_dir = Path(self.cfg.dynamic_diagnostics_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{sample_token}_{camera_sd_token}"
-
-        def overlay(
-            mask: Tensor,
-            color: tuple[float, float, float],
-            alpha: float,
-        ) -> Tensor:
-            mask = mask.to(dtype=image.dtype).clamp(0, 1)
-            color_tensor = image.new_tensor(color).view(3, 1, 1)
-            return image * (1.0 - alpha * mask) + color_tensor * alpha * mask
-
-        save_image(
-            overlay(dynamic_mask, (1.0, 0.0, 0.0), 0.45),
-            output_dir / f"{stem}_dynamic_mask.png",
-        )
-        save_image(
-            overlay(raw_lidar_mask, (1.0, 0.2, 0.0), 0.9),
-            output_dir / f"{stem}_lidar_before.png",
-        )
-        save_image(
-            overlay(filtered_lidar_mask, (0.0, 1.0, 0.2), 0.9),
-            output_dir / f"{stem}_lidar_after.png",
-        )
-
-        dynamic_ratio = dynamic_mask.float().mean().item()
-        lidar_points_before = raw_lidar_mask.sum().item()
-        lidar_points_after = filtered_lidar_mask.sum().item()
-        print(
-            "[Dynamic diagnostics] "
-            f"dynamic_ratio={dynamic_ratio:.6f}, "
-            f"lidar_points_before={lidar_points_before:.0f}, "
-            f"lidar_points_after={lidar_points_after:.0f}, "
-            f"output_dir={output_dir}"
-        )
 
     def _build_index(self) -> list[dict]:
         """
@@ -607,7 +570,6 @@ class DatasetNuScenes(IterableDataset):
             # ===== 在 crop 之后生成 LiDAR depth / mask =====
             context_lidar_depths = []
             context_lidar_masks = []
-            context_raw_lidar_masks = []
 
             for i, ctx_idx in enumerate(context_indices.tolist()):
                 H, W = example["context"]["image"][i].shape[-2:]
@@ -623,7 +585,6 @@ class DatasetNuScenes(IterableDataset):
                 # Dynamic LiDAR points must be removed before any model branch
                 # can consume lidar_depth/lidar_mask.
                 static_mask = 1.0 - example["context"]["dynamic_mask"][i]
-                context_raw_lidar_masks.append(lidar_mask.clone())
                 lidar_mask = lidar_mask * static_mask
                 lidar_depth = lidar_depth * lidar_mask
 
@@ -637,29 +598,34 @@ class DatasetNuScenes(IterableDataset):
                 context_lidar_masks, dim=0
             )  # [v,1,H,W]
 
-            if (
-                self.cfg.save_dynamic_diagnostics
-                and not self._dynamic_diagnostic_saved
-                and example["context"]["dynamic_mask"].sum() > 0
-            ):
-                diagnostic_view = int(
-                    example["context"]["dynamic_mask"]
-                    .flatten(1)
-                    .sum(dim=1)
-                    .argmax()
-                    .item()
-                )
-                self._save_dynamic_diagnostics(
-                    image=example["context"]["image"][diagnostic_view],
-                    dynamic_mask=example["context"]["dynamic_mask"][diagnostic_view],
-                    raw_lidar_mask=context_raw_lidar_masks[diagnostic_view],
-                    filtered_lidar_mask=example["context"]["lidar_mask"][
-                        diagnostic_view
-                    ],
-                    sample_token=context_sample_tokens[diagnostic_view],
-                    camera_sd_token=camera_sd_tokens[diagnostic_view],
-                )
-                self._dynamic_diagnostic_saved = True
+            if self.cfg._prepare_depth_labels and self.stage == "train":
+                cross_depths, cross_masks, cross_stats = [], [], []
+                ctx = example["context"]
+                for destination in range(num_context):
+                    source = 1 - destination
+                    shape = tuple(ctx["image"][destination].shape[-2:])
+                    k = ctx["intrinsics"][destination]
+                    depth, mask = self._project_lidar_to_camera(
+                        lidar_sd_tokens[source], camera_sd_tokens[destination], k, shape,
+                        static_sample_token=context_sample_tokens[source],
+                    )
+                    source_dynamic = self._project_dynamic_mask_to_camera(
+                        context_sample_tokens[source], camera_sd_tokens[destination], k, shape
+                    )
+                    valid = (mask > .5) & (ctx["dynamic_mask"][destination] < .5) & (source_dynamic < .5)
+                    own = ctx["lidar_depth"][destination]
+                    overlap = valid & (ctx["lidar_mask"][destination] > .5)
+                    threshold = torch.maximum(torch.full_like(own, self.cfg.cross_lidar_abs_tol), own * self.cfg.cross_lidar_rel_tol)
+                    behind = overlap & (depth - own > threshold)
+                    front = overlap & (own - depth > threshold)
+                    valid = valid & ~behind & ~front
+                    new = valid & (ctx["lidar_mask"][destination] < .5)
+                    cross_stats.append(torch.stack([valid.sum(), new.sum(), behind.sum(), front.sum()]))
+                    cross_depths.append(torch.where(valid, depth, 0.))
+                    cross_masks.append(valid.float())
+                ctx["cross_lidar_depth"] = torch.stack(cross_depths)
+                ctx["cross_lidar_mask"] = torch.stack(cross_masks)
+                ctx["cross_lidar_stats"] = torch.stack(cross_stats)
 
             # Augment all aligned image-space tensors together. In particular,
             # projected dynamic masks and filtered LiDAR must follow an RGB flip.

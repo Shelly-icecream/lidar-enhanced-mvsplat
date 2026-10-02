@@ -2,17 +2,17 @@ from torch.utils.data import Dataset
 
 from ..misc.step_tracker import StepTracker
 from .dataset_re10k import DatasetRE10k, DatasetRE10kCfg
-from .dataset_nuscenes import DatasetNuScenes, DatasetNuScenesCfg  # 【新增】
+from .dataset_nuscenes import DatasetNuScenes, DatasetNuScenesCfg
 from .types import Stage
 from .view_sampler import get_view_sampler
 
 DATASETS: dict[str, Dataset] = {
     "re10k": DatasetRE10k,
-    "nuscenes": DatasetNuScenes,  # 【新增】
+    "nuscenes": DatasetNuScenes,
 }
 
 
-DatasetCfg = DatasetRE10kCfg | DatasetNuScenesCfg  # 【修改】
+DatasetCfg = DatasetRE10kCfg | DatasetNuScenesCfg
 
 
 def get_dataset(

@@ -43,6 +43,9 @@ use_epipolar_trans: false      # Table B: w/ Epipolar Transformer
 
 # LiDAR guidance
 use_lidar_bias: false
+# null falls back to the legacy shared switch above.
+use_lidar_bias_train: null
+use_lidar_bias_eval: null
 use_lidar_gaussian_adapter: false
 lidar_gaussian_edit_xy: true
 lidar_gaussian_edit_scale: true

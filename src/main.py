@@ -131,15 +131,11 @@ def train(cfg_dict: DictConfig):
         "losses": get_losses(cfg.loss),
         "step_tracker": step_tracker,
     }
-    if checkpoint_path is not None and (
-        cfg.mode == "test" or (cfg.mode == "train" and not cfg.checkpointing.resume)
-    ):
+    if cfg.mode == "train" and checkpoint_path is not None and not cfg.checkpointing.resume:
         # Just load model weights, without optimizer states
         # e.g., fine-tune from the released weights on other datasets
-        model_wrapper = ModelWrapper.load_split_checkpoint(
-            checkpoint_path, 
-            k=cfg.model.encoder.gaussians_per_pixel,
-            **model_kwargs)
+        model_wrapper = ModelWrapper.load_from_checkpoint(
+            checkpoint_path, **model_kwargs, strict=True)
         print(cyan(f"Loaded weigths from {checkpoint_path}."))
     else:
         model_wrapper = ModelWrapper(**model_kwargs)
@@ -158,8 +154,7 @@ def train(cfg_dict: DictConfig):
         trainer.test(
             model_wrapper,
             datamodule=data_module,
-            # Weights are already loaded, including any single-head migration.
-            ckpt_path=None,
+            ckpt_path=checkpoint_path,
         )
 
 
