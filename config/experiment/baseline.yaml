@@ -10,7 +10,7 @@ defaults:
 wandb:
   name: baseline
   tags: [nuscenes, re10k, visual_only, baseline]
-  mode: online
+  mode: disabled
 
 data_loader:
   train:

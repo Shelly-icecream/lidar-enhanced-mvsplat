@@ -234,6 +234,30 @@ python -m src.main \
 
 评测分数和渲染图像写入对应的 `outputs` 目录。测试时可用 `save_lidar_alpha_diagnostics` 控制 LiDAR alpha 诊断；运动物体 mask 的生成与过滤逻辑见 4.1 节。
 
+### 6.1 分别渲染 Context 高斯和完整高斯
+
+脚本 `src/scripts/render_context_gaussians.py` 默认继承 `baseline.yaml`，
+加载 `checkpoints/re10k.ckpt`，沿用 baseline 的数据集、相机、分辨率和测试采样配置。
+一次编码后，将各 context view 的 Gaussian 子集分别渲染到 target 相机，
+同时输出全部 context Gaussian 的完整渲染和 target 真值。需要 CUDA rasterizer：
+
+```bash
+python -m src.scripts.render_context_gaussians
+
+# 仅渲染一个测试 batch，可覆盖 checkpoint 和输出目录
+python -m src.scripts.render_context_gaussians \
+  checkpointing.load=checkpoints/re10k.ckpt \
+  render.max_batches=1 \
+  render.output_dir=outputs/context_render
+```
+
+结果保存在
+`outputs/context_render/<SCENE>/batch_<BATCH>/target_<INDEX>/`，其中
+`context_0.png`、`context_1.png` 是各 context Gaussian 子集的渲染，
+`full.png` 是全部 context Gaussian 的联合渲染，`ground_truth.png` 是 target 图像。
+完整配置保存为输出目录下的 `config.yaml`。
+nuScenes 当前返回的 `INDEX` 是样本内部视角编号，context/target 帧由数据集自动选取。
+
 ## 7. W&B
 
 可在实验 YAML 中设置 W&B 项目、实体与运行名称，或通过命令行覆盖。首次使用运行：

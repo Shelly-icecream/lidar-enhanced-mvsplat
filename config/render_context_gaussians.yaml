@@ -1,0 +1,10 @@
+defaults:
+  - main
+  - experiment: baseline
+  - _self_
+
+mode: test
+
+render:
+  output_dir: outputs/context_render
+  max_batches: null
