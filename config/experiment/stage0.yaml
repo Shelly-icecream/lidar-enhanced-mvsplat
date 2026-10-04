@@ -1,6 +1,6 @@
 # @package _global_
 # Pre-adapter setup: load the pretrained RE10K checkpoint on nuScenes with
-# LiDAR depth bias enabled, while both LiDAR adapters remain disabled.
+# Both LiDAR adapters remain disabled.
 defaults:
   - override /dataset: nuscenes
   - override /model/encoder: costvolume
@@ -8,8 +8,8 @@ defaults:
   - override /loss: [mse]
 
 wandb:
-  name: nuscenes_lidar_bias_pre_adapter
-  tags: [nuscenes, re10k, lidar_bias, pre_adapter]
+  name: nuscenes_re10k_pre_adapter
+  tags: [nuscenes, re10k, pre_adapter]
   mode: online
 
 data_loader:
@@ -35,9 +35,6 @@ trainer:
 # ----- model params -----
 model:
   encoder:
-    use_lidar_gaussian_adapter: false
-    use_lidar_gaussian_adapter_loss: false
-
     num_depth_candidates: 128
     costvolume_unet_feat_dim: 128
     costvolume_unet_channel_mult: [1, 1, 1]
@@ -87,13 +84,11 @@ dataset:
   frame_stride: 1
 
 train:
-  use_lidar_bias: false
   depth_mode: null              
   extended_visualization: false 
   print_log_every_n_steps: 50   
 
 test:
-  use_lidar_bias: true
   output_path: outputs/test     
   eval_time_skip_steps: 5
   compute_scores: true

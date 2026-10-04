@@ -9,7 +9,7 @@
 | 配置 | 作用 | 当前训练目标 |
 | --- | --- | --- |
 | `baseline.yaml` | 加载 RE10K checkpoint，关闭全部 LiDAR 分支 | 不训练额外模块，用于视觉模型直接推理 |
-| `stage0.yaml` | 加载 RE10K checkpoint 并启用 LiDAR depth bias | LiDAR Gaussian adapter 关闭，用于推理与消融 |
+| `stage0.yaml` | 加载 RE10K checkpoint | LiDAR Gaussian adapter 关闭，用于推理与消融 |
 | `stage2.yaml` | LiDAR Gaussian 属性修正 | 冻结基础网络，训练 Gaussian adapter |
 
 注意：`baseline/re10k.yaml` 当前仍保留旧冻结项 `depth_predictor.to_disparity`。使用这些配置前，需要将该项替换为 `depth_predictor.to_disparity_disps` 和 `depth_predictor.to_disparity_opacity`，否则 encoder 初始化的严格前缀检查会报错。
@@ -75,9 +75,8 @@ flowchart TD
     N --> P["高斯属性"]
 
     V --> CL["clamp 到 near/far 逆深度范围"]
-    CL --> REPLACE["有效 LiDAR 像素替换逆深度<br/>use_lidar_bias = true"]
-    LD["Context LiDAR 逆深度<br/>及有效掩码"] --> REPLACE
-    REPLACE --> Z["取倒数 → 最终深度"]
+    CL --> Z["取倒数 → 最终深度"]
+    LD["Context LiDAR 逆深度<br/>及有效掩码"]
     O0 --> OP["sigmoid → density → opacity 映射"]
     Z --> Q["GaussianAdapter · 高斯参数构建<br/>非可训练 LiDAR 残差 adapter"]
     OP --> Q
@@ -202,11 +201,11 @@ python -m src.main \
   checkpointing.resume=false
 ```
 
-当前配置使用学习率 `1e-6`、2000 steps、MSE 监督（LPIPS 权重为 0），冻结 backbone、refinement、opacity 头和 `to_gaussians`。开启 LiDAR hard-anchor bias，LiDAR Gaussian adapter 关闭。旧单头权重会自动拆分；新双头权重再次微调时直接加载。`resume=true` 用于恢复结构与配置匹配的新双头训练 checkpoint，不用于迁移旧单头优化器状态。
+当前配置使用学习率 `1e-6`、2000 steps、MSE 监督（LPIPS 权重为 0），冻结 backbone、refinement、opacity 头和 `to_gaussians`。LiDAR Gaussian adapter 关闭。旧单头权重会自动拆分；新双头权重再次微调时直接加载。`resume=true` 用于恢复结构与配置匹配的新双头训练 checkpoint，不用于迁移旧单头优化器状态。
 
 ## 6. 测试与评测
 
-视觉模型 Baseline 关闭 LiDAR depth bias 和LiDAR Gaussian adapter，直接加载
+视觉模型 Baseline 关闭 LiDAR Gaussian adapter，直接加载
 `re10k.ckpt` 推理：
 
 ```bash
@@ -296,12 +295,11 @@ ls checkpoints/re10k.ckpt
 
 PSNR/SSIM 越高越好，LPIPS 越低越好。
 
-| 实验 | LiDAR bias | Gaussian adapter | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | 推理展示（scene-0103） |
-| --- | :---: | :---: | --- | ---: | ---: | ---: | :---: |
-| Baseline | — | — | 无（直接推理） | 17.4256 | **0.4068** | **0.3872** | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
-| Bias | ✓ | — | 无（直接推理） | 17.4115 | 0.3921 | 0.4138 | <img src="outputs/test/re10k/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
-| Stage 3 | ✓ | — | `depth_predictor.depth_head_lowres,refine_unet,to_disparity_disps` | **17.6212** | 0.3975 | 0.4141 | <img src="outputs/test/stage3-8000/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
-| Stage 2-v3 | ✓ | ✓ | `depth_predictor.lidar_gaussian_adapter` | 17.5519 | 0.3900 | 0.4193 | <img src="outputs/test/stage2-v3/scene-0103_87e772078a494d42bd34cd16172808bc/prediction/000002.png" width="240"> |
+| 实验 | 增加loss | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | 推理展示（scene-0103） |
+| --- | :---: | --- | ---: | ---: | ---: | :---: |
+| Stage 0 | — | 无（直接推理） | 17.4256 | 0.4068 | 0.3872 | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
+| Stage 1 | cross_visual_depth | `depth_predictor.to_disparity` | 20.4386 | 0.5668 | 0.3083 | <img src="outputs/test/stage1/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
+| Stage 2 | context_rgb | `depth_predictor.lidar_gaussians` | **20.8392** | **0.5738** | **0.2939** | <img src="outputs/test/stage2/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 
 
 
@@ -317,49 +315,3 @@ PSNR/SSIM 越高越好，LPIPS 越低越好。
   year    = {2024}
 }
 ```
-
-
-v2
-psnr 17.475660262169775
-ssim 0.38809252114264997
-lpips 0.42160927823611666
-v1
-17.5172
-0.3905
-0.4198
-
-stage5-v2
-psnr 17.670995588426464
-ssim 0.39989208633249457
-lpips 0.41357617757537146
-
-## Stage6：固定几何，训练 SH 颜色
-
-`config/experiment/stage6.yaml` 将 `to_gaussians` 切成独立的 `geometry` 和
-`sh` 两个卷积分支。只训练 `depth_predictor.to_gaussians.sh`（全部 SH 系数），
-其余参数冻结。加载旧的联合头权重时自动复制首层并按输出通道切分末层，
-保持初始预测；Stage6 检查点推理也应使用 Stage6 配置。
-
-同一组联合高斯既渲染到 target，也渲染回全部 context 相机。
-两组图像均使用 MSE 颜色约束（权重 1.0）和图像梯度结构约束（权重 0.05），
-排除动态 mask；context 监督覆盖所有静态像素，不限于 LiDAR 点。
-不启用深度损失。结构约束指 RGB 相邻像素梯度匹配，并非深度平面约束。
-
-```bash
-python -m src.main +experiment=stage6 checkpointing.load=checkpoints/stage3.ckpt
-```
-
-也可将加载路径换成 `checkpoints/stage5-v2.ckpt`。默认学习率为 `1e-5`。
-`loss.context_color_weight` 与 `loss.context_structure_weight` 控制新增的
-context 监督，其他阶段默认均为 0，保留原训练行为。
-
-深度损失统一由 `train.enable_depth_losses` 控制，默认关闭，仅 Stage3 默认开启。
-关闭时直接跳过 `cross_visual_depth`、`cross_lidar_depth`、`lidar_depth` 的
-forward 和诊断计算，不影响 MSE、结构约束和 context 重建。
-此开关同时控制跨视图 LiDAR 标签生成；开启时自动补齐未配置的三项深度损失，
-已有损失参数保持不变。Stage6 默认关闭。临时关闭可使用 `train.enable_depth_losses=false`。
-
-LiDAR bias 可分别设置 `train.use_lidar_bias`（训练）和
-`test.use_lidar_bias`（验证、测试、推理）。Stage6 两项默认均为
-`true`，保持原行为；其他配置未指定时沿用旧的 `use_lidar_bias`。
-模型通过 `train()` / `eval()` 自动选择，不受参数是否冻结影响。

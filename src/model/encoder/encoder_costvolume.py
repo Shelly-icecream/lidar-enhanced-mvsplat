@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Optional, List
 
 import torch
@@ -58,6 +58,7 @@ class EncoderCostVolumeCfg:
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
+    frozen_params: List[str] = field(default_factory=list)
 
 
 class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
@@ -123,6 +124,20 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             wo_cost_volume=cfg.wo_cost_volume,
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
         )
+
+        parameters = dict(self.named_parameters())
+        for prefix in cfg.frozen_params:
+            matched = [
+                parameter
+                for name, parameter in parameters.items()
+                if prefix and (name == prefix or name.startswith(prefix + "."))
+            ]
+            if not matched:
+                raise ValueError(
+                    f"model.encoder.frozen_params prefix {prefix!r} matches no parameters"
+                )
+            for parameter in matched:
+                parameter.requires_grad_(False)
 
     def map_pdf_to_opacity(
         self,
@@ -259,6 +274,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 opacity_multiplier * gaussians.opacities,
                 "b v r srf spp -> b (v r srf spp)",
             ),
+            context_depth=depths.mean(dim=(-1, -2)).reshape(b, v, h, w),
         )
 
     def get_data_shim(self) -> DataShim:

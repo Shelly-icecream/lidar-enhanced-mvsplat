@@ -7,11 +7,12 @@ from torch import Tensor
 
 Real = Union[float, int]
 
+# Shared by 2D coordinates and RGB colors; sanitize_vector checks the requested dim.
 Vector = Union[
     Real,
     Iterable[Real],
-    Shaped[Tensor, "3"],
-    Shaped[Tensor, "batch 3"],
+    Shaped[Tensor, "_"],
+    Shaped[Tensor, "#batch _"],
 ]
 
 

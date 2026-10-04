@@ -20,6 +20,7 @@ from ..dataset import DatasetCfg
 from ..evaluation.metrics import compute_lpips, compute_psnr, compute_ssim
 from ..global_cfg import get_cfg
 from ..loss import Loss
+from ..loss.loss_context_rgb import LossContextRgb
 from ..misc.benchmarker import Benchmarker
 from ..misc.image_io import prep_image, save_image, save_video
 from ..misc.LocalLogger import LOG_PATH, LocalLogger
@@ -63,6 +64,7 @@ class TrainCfg:
     depth_mode: DepthRenderingMode | None
     extended_visualization: bool
     print_log_every_n_steps: int
+    render_validation_video: bool = False
 
 
 @runtime_checkable
@@ -147,10 +149,26 @@ class ModelWrapper(LightningModule):
         self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
 
         # Compute and log loss.
+        context_output = None
+        if any(isinstance(loss_fn, LossContextRgb) for loss_fn in self.losses):
+            context = batch["context"]
+            # Render the merged, unfiltered Gaussians into every context camera.
+            context_output = self.decoder.forward(
+                gaussians,
+                context["extrinsics"],
+                context["intrinsics"],
+                context["near"],
+                context["far"],
+                tuple(context["image"].shape[-2:]),
+                depth_mode=None,
+            )
         total_loss = 0
         for loss_fn in self.losses:
-            loss = loss_fn.forward(output, batch, gaussians, self.global_step)
+            prediction = context_output if isinstance(loss_fn, LossContextRgb) else output
+            loss = loss_fn.forward(prediction, batch, gaussians, self.global_step)
             self.log(f"loss/{loss_fn.name}", loss)
+            for name, value in getattr(loss_fn, "diagnostics", {}).items():
+                self.log(f"loss/{loss_fn.name}/{name}", value)
             total_loss = total_loss + loss
         self.log("loss/total", total_loss)
 
@@ -354,11 +372,12 @@ class ModelWrapper(LightningModule):
             ).items():
                 self.logger.log_image(k, [prep_image(image)], step=self.global_step)
 
-        # Run video validation step.
-        self.render_video_interpolation(batch)
-        self.render_video_wobble(batch)
-        if self.train_cfg.extended_visualization:
-            self.render_video_interpolation_exaggerated(batch)
+        # Optional visualization; video rendering is not needed for training.
+        if self.train_cfg.render_validation_video:
+            self.render_video_interpolation(batch)
+            self.render_video_wobble(batch)
+            if self.train_cfg.extended_visualization:
+                self.render_video_interpolation_exaggerated(batch)
 
     @rank_zero_only
     def render_video_wobble(self, batch: BatchedExample) -> None:

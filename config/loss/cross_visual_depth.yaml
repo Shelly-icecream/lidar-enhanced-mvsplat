@@ -1,0 +1,7 @@
+cross_visual_depth:
+  print_every_n_steps: 50
+  color_threshold: 0.1
+  weight: 1.0
+  beta: 0.01
+  reprojection_threshold_px: 1.0
+  relative_depth_threshold: 0.05
