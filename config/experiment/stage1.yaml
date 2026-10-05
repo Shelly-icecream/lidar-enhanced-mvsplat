@@ -2,7 +2,7 @@
 defaults:
   - override /dataset: nuscenes
   - override /model/encoder: costvolume
-  - override /loss: [mse,cross_visual_depth]
+  - override /loss: [mse, lpips, cross_visual_depth]
 
 wandb:
   name: baseline
@@ -32,6 +32,9 @@ trainer:
 # ----- model params -----
 model:
   encoder:
+    use_lidar_bias_train: true
+    use_lidar_bias_test: true
+
     num_depth_candidates: 128
     costvolume_unet_feat_dim: 128
     costvolume_unet_channel_mult: [1, 1, 1]
@@ -60,7 +63,7 @@ loss:
     color_threshold: 0.1
     weight: 1.0
     beta: 0.01
-    reprojection_threshold_px: 1.0
+    reprojection_threshold_px: 5.0
     relative_depth_threshold: 0.20
   
   # 结构约束
@@ -76,6 +79,8 @@ optimizer:
 
 # ----- dataset -----
 dataset:
+  load_lidar_depth: true
+
   image_shape: [176, 320]
   root: datasets/nuscenes
   version: v1.0-mini

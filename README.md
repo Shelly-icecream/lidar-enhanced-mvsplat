@@ -291,6 +291,46 @@ ls datasets/nuscenes
 ls checkpoints/re10k.ckpt
 ```
 
+### LiDAR bias：训练与测试独立开关
+
+nuScenes 的 `stage0`、`stage1`、`stage2`、`test`、`test_` 配置均开启以下选项：
+
+```yaml
+dataset:
+  load_lidar_depth: true
+model:
+  encoder:
+    use_lidar_bias_train: true
+    use_lidar_bias_test: true
+```
+
+训练使用 `use_lidar_bias_train`，验证和测试使用 `use_lidar_bias_test`。LiDAR 单帧点云按各 context 的相机时间和位姿投影到裁剪后的图像，在深度预测器完成 `to_disparity`、截断和逆深度转换后，硬替换有效像素的最终 Z-depth，再生成高斯。`context_depth` 与深度一致性损失也使用替换后的深度。
+
+仅替换 near/far 范围内的有效 LiDAR 点；同像素多点取最近点，空缺处保留网络预测，不插值或补成稠密深度。替换处不向网络深度分支回传梯度，未替换处保留原梯度。此功能不新增网络参数，可加载已有 checkpoint。
+
+例如，只在训练时使用 LiDAR：
+
+```bash
+python -m src.main +experiment=stage1 model.encoder.use_lidar_bias_train=true model.encoder.use_lidar_bias_test=false
+```
+
+非 LiDAR 数据集的 `acid`、`dtu` 配置默认关闭两个开关。深度诊断脚本默认检查未替换的网络预测，增加 `--lidar-bias` 可检查硬替换后的结果。
+
+### LiDAR 监督截断前的逆深度
+
+nuScenes 实验的 loss 列表已加入 `lidar_inverse_depth`：
+
+```yaml
+loss:
+  lidar_inverse_depth:
+    weight: 1.0
+    beta: 0.01
+```
+
+该项在有效 context LiDAR 像素上比较 `粗逆深度 + to_disparity 修正值` 与 `1 / LiDAR Z-depth`，使用 Smooth L1，按有效像素和深度样本数归一化。预测取自 `clamp` 和 LiDAR 硬替换之前，不 detach，因而越界预测仍能获得梯度。无有效点时返回零；空缺、非有限或超出 near/far 的 LiDAR 点不参与。
+
+这项监督独立于硬替换开关，只要求 `dataset.load_lidar_depth=true`。`weight=0` 可关闭它的贡献。stage0、stage2 当前冻结 `depth_predictor.to_disparity`，所以该项不会在这两个配置中更新深度分支；需要训练深度时，应从 `frozen_params` 中去掉该项。
+
 ## 9. 实验记录
 
 PSNR/SSIM 越高越好，LPIPS 越低越好。
@@ -299,7 +339,8 @@ PSNR/SSIM 越高越好，LPIPS 越低越好。
 | --- | :---: | --- | ---: | ---: | ---: | :---: |
 | Stage 0 | — | 无（直接推理） | 17.4256 | 0.4068 | 0.3872 | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 | Stage 1 | cross_visual_depth | `depth_predictor.to_disparity` | 20.4386 | 0.5668 | 0.3083 | <img src="outputs/test/stage1/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
-| Stage 2 | context_rgb | `depth_predictor.lidar_gaussians` | **20.8392** | **0.5738** | **0.2939** | <img src="outputs/test/stage2/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
+| Stage 2 | context_rgb | `depth_predictor.lidar_gaussians` | 20.8392 | 0.5738 | 0.2939 | <img src="outputs/test/stage2/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
+| Stage 3 | cross_visual_depth, lidar_inverse_depth, context_rgb | `depth_predictor.depth_head_lowres`、`depth_predictor.refine_unet`、`depth_predictor.to_disparity`、`depth_predictor.to_gaussians` | **21.4204** | **0.6007** | **0.2771** | <img src="outputs/test/stage3/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 
 
 

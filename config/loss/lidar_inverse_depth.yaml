@@ -1,0 +1,4 @@
+lidar_inverse_depth:
+  weight: 1.0
+  # Smooth L1 transition in inverse meters; supervises before clamp.
+  beta: 0.01

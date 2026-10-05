@@ -22,8 +22,13 @@ def apply_patch_shim_to_views(views: BatchedViews, patch_size: int) -> BatchedVi
     intrinsics[:, :, 0, 2] = (intrinsics[:, :, 0, 2] * w - col) / w_new
     intrinsics[:, :, 1, 2] = (intrinsics[:, :, 1, 2] * h - row) / h_new
 
+    aligned_maps = {
+        key: views[key][..., row : row + h_new, col : col + w_new]
+        for key in ("lidar_depth", "dynamic_mask") if key in views
+    }
     return {
         **views,
+        **aligned_maps,
         "image": image,
         "intrinsics": intrinsics,
     }

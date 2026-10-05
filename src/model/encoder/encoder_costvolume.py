@@ -18,6 +18,7 @@ from .backbone import (
 from .common.gaussian_adapter import GaussianAdapter, GaussianAdapterCfg
 from .encoder import Encoder
 from .costvolume.depth_predictor_multiview import DepthPredictorMultiView
+from .costvolume.lidar_bias import replace_depth_with_lidar
 from .visualization.encoder_visualizer_costvolume_cfg import EncoderVisualizerCostVolumeCfg
 
 from ...global_cfg import get_cfg
@@ -59,6 +60,8 @@ class EncoderCostVolumeCfg:
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
     frozen_params: List[str] = field(default_factory=list)
+    use_lidar_bias_train: bool = False
+    use_lidar_bias_test: bool = False
 
 
 class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
@@ -202,6 +205,19 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             cnn_features=cnn_features,
         )
 
+        # Replace final refined Z-depth, after to_disparity/clamp and before
+        # Gaussian construction. Both geometry and depth losses see this result.
+        use_lidar_bias = (
+            self.cfg.use_lidar_bias_train if self.training
+            else self.cfg.use_lidar_bias_test
+        )
+        if use_lidar_bias:
+            if "lidar_depth" not in context:
+                raise ValueError("LiDAR bias requires dataset.load_lidar_depth=true.")
+            depths = replace_depth_with_lidar(
+                depths, context["lidar_depth"], context["near"], context["far"]
+            )
+
         # Convert the features and depths into Gaussians.
         xy_ray, _ = sample_image_grid((h, w), device)
         xy_ray = rearrange(xy_ray, "h w xy -> (h w) () xy")
@@ -275,6 +291,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 "b v r srf spp -> b (v r srf spp)",
             ),
             context_depth=depths.mean(dim=(-1, -2)).reshape(b, v, h, w),
+            raw_context_inverse_depth=extra_info["raw_context_inverse_depth"],
         )
 
     def get_data_shim(self) -> DataShim:

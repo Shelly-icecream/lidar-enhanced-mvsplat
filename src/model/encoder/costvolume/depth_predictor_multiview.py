@@ -360,6 +360,7 @@ class DepthPredictorMultiView(nn.Module):
         )
 
         if self.wo_depth_refine:
+            raw_disps = fullres_disps
             densities = repeat(
                 pdf_max,
                 "(v b) dpt h w -> b v (h w) srf dpt",
@@ -391,7 +392,8 @@ class DepthPredictorMultiView(nn.Module):
                 srf=1,
             )
 
-            fine_disps = (fullres_disps + delta_disps).clamp(
+            raw_disps = fullres_disps + delta_disps
+            fine_disps = raw_disps.clamp(
                 1.0 / rearrange(far, "b v -> (v b) () () ()"),
                 1.0 / rearrange(near, "b v -> (v b) () () ()"),
             )
@@ -404,4 +406,8 @@ class DepthPredictorMultiView(nn.Module):
                 srf=1,
             )
 
+        # Keep the graph before clamp and before LiDAR hard replacement.
+        extra_info["raw_context_inverse_depth"] = rearrange(
+            raw_disps, "(v b) s h w -> b v h w s", b=b, v=v
+        )
         return depths, densities, raw_gaussians

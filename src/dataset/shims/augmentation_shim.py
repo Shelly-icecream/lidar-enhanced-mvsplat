@@ -18,6 +18,7 @@ def reflect_views(views: AnyViews) -> AnyViews:
         **views,
         "image": views["image"].flip(-1),
         "extrinsics": reflect_extrinsics(views["extrinsics"]),
+        **{key: views[key].flip(-1) for key in ("lidar_depth", "dynamic_mask") if key in views},
     }
 
 

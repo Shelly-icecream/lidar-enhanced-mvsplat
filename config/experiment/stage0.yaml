@@ -1,11 +1,8 @@
 # @package _global_
-# Pre-adapter setup: load the pretrained RE10K checkpoint on nuScenes with
-# Both LiDAR adapters remain disabled.
 defaults:
   - override /dataset: nuscenes
   - override /model/encoder: costvolume
-  # Keep a typed-config placeholder. Adapter-loss mode skips this global loss.
-  - override /loss: [mse]
+  - override /loss: [mse,lpips, lidar_inverse_depth]
 
 wandb:
   name: nuscenes_re10k_pre_adapter
@@ -35,6 +32,9 @@ trainer:
 # ----- model params -----
 model:
   encoder:
+    # Hard LiDAR Z-depth replacement after depth refinement.
+    use_lidar_bias_train: true
+    use_lidar_bias_test: true
     num_depth_candidates: 128
     costvolume_unet_feat_dim: 128
     costvolume_unet_channel_mult: [1, 1, 1]
@@ -64,6 +64,7 @@ optimizer:
 
 # ----- dataset -----
 dataset:
+  load_lidar_depth: true
   image_shape: [176, 320]
   root: datasets/nuscenes
   version: v1.0-mini

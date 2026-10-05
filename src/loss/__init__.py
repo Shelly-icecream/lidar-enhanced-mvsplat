@@ -4,8 +4,10 @@ from .loss_cross_visual_depth import LossCrossVisualDepth, LossCrossVisualDepthC
 from .loss_depth import LossDepth, LossDepthCfgWrapper
 from .loss_lpips import LossLpips, LossLpipsCfgWrapper
 from .loss_mse import LossMse, LossMseCfgWrapper
+from .loss_lidar_inverse_depth import LossLidarInverseDepth, LossLidarInverseDepthCfgWrapper
 
 LOSSES = {
+    LossLidarInverseDepthCfgWrapper: LossLidarInverseDepth,
     LossContextRgbCfgWrapper: LossContextRgb,
     LossCrossVisualDepthCfgWrapper: LossCrossVisualDepth,
     LossDepthCfgWrapper: LossDepth,
@@ -13,7 +15,7 @@ LOSSES = {
     LossMseCfgWrapper: LossMse,
 }
 
-LossCfgWrapper = LossDepthCfgWrapper | LossLpipsCfgWrapper | LossMseCfgWrapper | LossCrossVisualDepthCfgWrapper | LossContextRgbCfgWrapper
+LossCfgWrapper = LossDepthCfgWrapper | LossLpipsCfgWrapper | LossMseCfgWrapper | LossCrossVisualDepthCfgWrapper | LossContextRgbCfgWrapper | LossLidarInverseDepthCfgWrapper
 
 
 def get_losses(cfgs: list[LossCfgWrapper]) -> list[Loss]:

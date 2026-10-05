@@ -2,6 +2,7 @@ defaults:
   - view_sampler: bounded
 
 name: nuscenes
+load_lidar_depth: false
 root: datasets/nuscenes
 version: v1.0-mini
 

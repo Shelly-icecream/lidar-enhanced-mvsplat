@@ -38,6 +38,7 @@ class DatasetNuScenesCfg(DatasetCfgCommon):
     skip_bad_shape: bool = True
     max_fov: float = 120.0
     use_keyframe_only: bool = True
+    load_lidar_depth: bool = False
 
     camera_name: str = "CAM_FRONT"
     num_context_views: int = 2
@@ -274,6 +275,27 @@ class DatasetNuScenes(IterableDataset):
 
         return items
 
+    def _load_lidar_depth(self, sample_token, camera_token, intrinsics, shape):
+        """Project single-sweep LiDAR into the cropped image; zero means missing."""
+        sample = self.nusc.get("sample", sample_token)
+        points, z, _ = self.nusc.explorer.map_pointcloud_to_image(
+            sample["data"]["LIDAR_TOP"], camera_token
+        )
+        camera = self.nusc.get("sample_data", camera_token)
+        calibration = self.nusc.get("calibrated_sensor", camera["calibrated_sensor_token"])
+        original_k = np.asarray(calibration["camera_intrinsic"])
+        rays = np.linalg.solve(original_k, np.vstack((points[:2], np.ones(len(z)))))
+        xy = intrinsics.numpy() @ rays
+        h, w = shape
+        x = np.floor(xy[0] * w).astype(np.int64)
+        y = np.floor(xy[1] * h).astype(np.int64)
+        valid = np.isfinite(z) & (z > 0) & (x >= 0) & (x < w) & (y >= 0) & (y < h)
+        depth = np.full(h * w, np.inf, dtype=np.float32)
+        # Retain the nearest surface when several points land in one pixel.
+        np.minimum.at(depth, y[valid] * w + x[valid], z[valid])
+        depth[~np.isfinite(depth)] = 0
+        return torch.from_numpy(depth.reshape(h, w))
+
     def __iter__(self):
         indices = list(range(len(self.items)))
 
@@ -347,7 +369,11 @@ class DatasetNuScenes(IterableDataset):
                     "image": context_images,
                     "near": self.get_bound("near", len(context_indices)),
                     "far": self.get_bound("far", len(context_indices)),
-                    "index": context_indices,
+                    # Loading slots [0, 1] are not scene time indices.
+                    "index": torch.tensor([
+                        item["target_time_index"] - self.cfg.frame_stride,
+                        item["target_time_index"] + self.cfg.frame_stride,
+                    ], dtype=torch.long),
                 },
                 "target": {
                     "extrinsics": extrinsics[target_indices],
@@ -355,12 +381,20 @@ class DatasetNuScenes(IterableDataset):
                     "image": target_images,
                     "near": self.get_bound("near", len(target_indices)),
                     "far": self.get_bound("far", len(target_indices)),
-                    "index": target_indices,
+                    "index": torch.tensor([item["target_time_index"]], dtype=torch.long),
                 },
                 "scene": f"{scene_name}_{sample_tokens[0]}",
             }
 
             example = apply_crop_shim(example, tuple(self.cfg.image_shape))
+            if self.cfg.load_lidar_depth:
+                example["context"]["lidar_depth"] = torch.stack([
+                    self._load_lidar_depth(
+                        token, camera_sd_tokens[i],
+                        example["context"]["intrinsics"][i],
+                        tuple(example["context"]["image"].shape[-2:]),
+                    ) for i, token in enumerate(context_sample_tokens)
+                ])
 
             # Build masks at the final image resolution. RGB remains untouched so
             # visual features and the cost volume are still computed globally.

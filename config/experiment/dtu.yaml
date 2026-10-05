@@ -19,6 +19,9 @@ trainer:
 # ----- Additional params for default best model customization
 model:
   encoder:
+    # Hard LiDAR Z-depth replacement after depth refinement.
+    use_lidar_bias_train: false
+    use_lidar_bias_test: false
     num_depth_candidates: 128
     costvolume_unet_feat_dim: 128
     costvolume_unet_channel_mult: [1,1,1]
