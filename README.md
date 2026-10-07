@@ -4,27 +4,13 @@
 
 ## 1. 当前进度
 
-目前仓库包含以下实验配置（旧配置的冻结前缀迁移见下文）：
-
-| 配置 | 作用 | 当前训练目标 |
-| --- | --- | --- |
-| `baseline.yaml` | 加载 RE10K checkpoint，关闭全部 LiDAR 分支 | 不训练额外模块，用于视觉模型直接推理 |
-| `stage0.yaml` | 加载 RE10K checkpoint 并启用 LiDAR depth bias | LiDAR Gaussian adapter 关闭，用于推理与消融 |
-| `stage2.yaml` | LiDAR Gaussian 属性修正 | 冻结基础网络，训练 Gaussian adapter |
-
-注意：`baseline/re10k.yaml` 当前仍保留旧冻结项 `depth_predictor.to_disparity`。使用这些配置前，需要将该项替换为 `depth_predictor.to_disparity_disps` 和 `depth_predictor.to_disparity_opacity`，否则 encoder 初始化的严格前缀检查会报错。
-
 已经完成的主要改动：
 
 - 新增 nuScenes 时序数据接入，默认使用 `CAM_FRONT`、两个 context 帧和一个 target 帧；
 - 新增运动物体 mask：将带动态属性的 nuScenes 3D annotation box 投影到图像，并扩张为保守的二维遮罩；动态区域的 LiDAR 点会在进入模型前被删除，训练损失也只在静态 target 像素上统计；
 - 在视觉深度 refinement 之后注入合法 LiDAR disparity，LiDAR 点作为稀疏硬锚点，超出相机 near/far 范围的点会被丢弃；
-- 新增 LiDAR Gaussian cross-attention adapter，可按配置修正 Gaussian 的 SH DC 与 opacity（当前 Stage 2 默认设置）；
-- 新增Gaussian adapter 的专用训练损失、alpha 改善指标及动态诊断输出；
 - Gaussian 中心深度统一由 camera z-depth 转换为沿射线距离，并使用预测的 sub-pixel offset 计算对应射线；
 - 增加严格的 `frozen_params` 前缀检查，避免配置写错后意外训练基础网络。
-- 将旧 `to_disparity` 拆为逆深度修正头 `to_disparity_disps` 和 density 头 `to_disparity_opacity`，各输出 `K = gaussians_per_pixel` 个通道，可分别冻结和训练；
-- 新增 `ModelWrapper.load_split_checkpoint`：两个头复制旧第一层，最后一层分别取旧输出的前、后 K 个通道；新双头 checkpoint 直接加载。微调和测试入口均支持迁移，测试不再重复加载原始旧文件；
 - target 动态 mask 合并 target 时刻与各 context 时刻动态物体 3D 框在 target 相机中的投影，进一步排除时序运动和遮挡区域的监督。
 
 当前阶段仍以 `v1.0-mini`、`176 × 320` 分辨率和 2000 steps 配置进行开发验证；正式结论应在 trainval split、更长训练和统一 checkpoint 条件下复现。
@@ -229,8 +215,6 @@ python -m src.main \
 wandb login
 ```
 
-请勿将个人 W&B API key 提交到仓库。共享配置前也应将个人 `wandb.entity` 改为团队实体或通过命令行传入。
-
 ## 8. 推荐目录结构
 
 ```text
@@ -279,75 +263,3 @@ ls checkpoints/re10k.ckpt
   year    = {2024}
 }
 ```
-
-
-
-```mermaid
-flowchart TD
-    A["两张 Context RGB"] --> B["backbone · 冻结"]
-    B --> C["多深度候选 Cost Volume"]
-    C --> D["corr_refine_net · 冻结"]
-    C --> E["regressor_residual · 冻结"]
-    D --> F["相加"]
-    E --> F
-    B --> I["upsampler · 冻结"]
-    I --> J["proj_feature · 冻结"]
-
-    subgraph DEPTH["深度分支 · Stage 3 可训练"]
-        G["depth_head_lowres"]
-        H["概率分布 → 粗逆深度上采样<br/>置信度上采样"]
-        L["refine_unet"]
-        M["to_disparity_disps"]
-        V["基础逆深度 + 逆深度残差<br/>裁剪前视觉逆深度"]
-        G --> H --> L --> M
-        H -->|"基础逆深度"| V
-        M -->|"残差"| V
-    end
-
-    subgraph ATTR["参考属性分支 · 冻结"]
-        G0["depth_head_lowres_attributes"]
-        H0["参考概率分布 → 粗逆深度上采样<br/>置信度上采样"]
-        L0["refine_unet_attributes"]
-        O0["to_disparity_opacity"]
-        G0 --> H0 --> L0 --> O0
-    end
-
-    F --> G
-    F --> G0
-    J --> L
-    J --> L0
-    A --> L
-    A --> L0
-
-    L0 --> AC["拼接参考属性特征 + Context RGB + upsampler 特征"]
-    A --> AC
-    I --> AC
-    AC --> N["to_gaussians · 冻结<br/>统一输出 offset + scale + rotation + color"]
-    N --> P["高斯属性"]
-
-    V --> CL["clamp 到 near/far 逆深度范围"]
-    CL --> REPLACE["有效 LiDAR 像素替换逆深度<br/>use_lidar_bias = true"]
-    LD["Context LiDAR 逆深度<br/>及有效掩码"] --> REPLACE
-    REPLACE --> Z["取倒数 → 最终深度"]
-    O0 --> OP["sigmoid → density → opacity 映射"]
-    Z --> Q["GaussianAdapter · 高斯参数构建<br/>非可训练 LiDAR 残差 adapter"]
-    OP --> Q
-    P --> Q
-    Q --> R["3D Gaussians"]
-    R --> RENDER["渲染目标帧 t"]
-    RENDER --> RGBLOSS["L_RGB = L_MSE + 0.05 L_LPIPS + 0.05 L_grad"]
-    TARGET["目标帧 RGB"] --> RGBLOSS
-    MASK["目标帧 dynamic_mask"] -->|"MSE 排除动态像素；grad 要求两端有效<br/>当前 LPIPS 仍比较整图"| RGBLOSS
-    V --> LL["L_LiDAR：有效像素逆深度 L1"]
-    LD --> LL
-    RGBLOSS --> TOTAL["L = L_RGB + 1.0 L_LiDAR"]
-    LL --> TOTAL
-
-    classDef trainable fill:#dcfce7,stroke:#16a34a;
-    classDef frozen fill:#f1f5f9,stroke:#64748b;
-    classDef loss fill:#fef3c7,stroke:#d97706;
-    class G,L,M trainable;
-    class B,D,E,I,J,G0,L0,O0,N frozen;
-    class LL,RGBLOSS,TOTAL loss;
-```
-
