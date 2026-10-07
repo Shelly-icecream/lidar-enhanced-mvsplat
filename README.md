@@ -337,6 +337,7 @@ PSNR/SSIM 越高越好，LPIPS 越低越好。
 
 | 实验 | 增加loss | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | 推理展示（scene-0103） |
 | --- | :---: | --- | ---: | ---: | ---: | :---: |
+| baseline | — | 无（直接推理） | 17.3907 | 0.4055 | 0.3885 | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 | Stage 0 | — | 无（直接推理） | 17.4256 | 0.4068 | 0.3872 | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 | Stage 1 | cross_visual_depth | `depth_predictor.to_disparity` | 20.4386 | 0.5668 | 0.3083 | <img src="outputs/test/stage1/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 | Stage 2 | context_rgb | `depth_predictor.lidar_gaussians` | 20.8392 | 0.5738 | 0.2939 | <img src="outputs/test/stage2/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
