@@ -5,6 +5,18 @@ defaults:
 
 mode: test
 
+dataset:
+  camera_names:
+    - CAM_FRONT
+    - CAM_FRONT_LEFT
+    - CAM_FRONT_RIGHT
+    - CAM_BACK
+    - CAM_BACK_LEFT
+    - CAM_BACK_RIGHT
+
 render:
   output_dir: outputs/context_render
+  # Select the first temporal window of each camera (four images per camera).
+  # max_batches only applies when this is false.
+  one_sample_per_camera: true
   max_batches: null

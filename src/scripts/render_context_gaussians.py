@@ -1,4 +1,6 @@
-"""Render each context's Gaussian subset and all Gaussians at target cameras.
+"""Render each context's Gaussian subset and all Gaussians for all six cameras.
+
+The default config uses independent temporal windows for each nuScenes camera.
 
 Run from the repository root:
     python -m src.scripts.render_context_gaussians render.max_batches=1
@@ -14,6 +16,7 @@ from pytorch_lightning import seed_everything
 
 from src.config import load_typed_root_config
 from src.dataset.data_module import DataModule
+from src.dataset.dataset_nuscenes import DatasetNuScenes
 from src.global_cfg import set_cfg
 from src.misc.image_io import save_image
 from src.misc.wandb_tools import update_checkpoint_path
@@ -79,7 +82,29 @@ def main(cfg_dict: DictConfig) -> None:
     output_dir = Path(cfg_dict.render.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     OmegaConf.save(cfg_dict, output_dir / "config.yaml")
-    loader = DataModule(cfg.dataset, cfg.data_loader).test_dataloader()
+    representative = cfg_dict.render.one_sample_per_camera
+
+    def select_samples(dataset, stage):
+        if not representative:
+            return dataset
+        if not isinstance(dataset, DatasetNuScenes):
+            raise ValueError("render.one_sample_per_camera requires the nuScenes dataset.")
+        first_per_camera = {}
+        for item in dataset.items:
+            first_per_camera.setdefault(item["camera_name"], item)
+        expected = cfg.dataset.camera_names or [cfg.dataset.camera_name]
+        missing = set(expected) - first_per_camera.keys()
+        if missing:
+            raise ValueError(f"No representative samples for cameras: {sorted(missing)}")
+        dataset.items = [first_per_camera[camera] for camera in expected]
+        print(f"Rendering one sample per camera: {', '.join(expected)}")
+        return dataset
+
+    loader = DataModule(
+        cfg.dataset, cfg.data_loader, dataset_shim=select_samples,
+    ).test_dataloader()
+    if representative and max_batches is not None:
+        print("Ignoring render.max_batches in one_sample_per_camera mode.")
 
     # Match test_step's opacity schedule (global_step=0) and inference settings.
     with torch.inference_mode():
@@ -116,7 +141,7 @@ def main(cfg_dict: DictConfig) -> None:
                     f"context_{view}.png",
                 )
             print(f"Rendered batch {batch_index} to {output_dir}")
-            if max_batches is not None and batch_index + 1 >= max_batches:
+            if not representative and max_batches is not None and batch_index + 1 >= max_batches:
                 break
 
 

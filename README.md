@@ -316,6 +316,20 @@ python -m src.main +experiment=stage1 model.encoder.use_lidar_bias_train=true mo
 
 非 LiDAR 数据集的 `acid`、`dtu` 配置默认关闭两个开关。深度诊断脚本默认检查未替换的网络预测，增加 `--lidar-bias` 可检查硬替换后的结果。
 
+### Stage 3 使用六路相机
+
+`config/experiment/stage3.yaml` 的 `dataset.camera_names` 已包含 nuScenes 全部六路相机。每路分别生成 `[t-1, t+1] → t` 时序样本，每个样本仍为 2 个 context 和 1 个 target；六路数据共同参与训练。`v1.0-mini` 下训练样本为 1842 个，验证/测试各 462 个。固定训练步数下，每路相机的覆盖次数会随样本总量增加而减少。
+
+每帧使用该相机 `sample_data` 对应的内参、传感器外参和拍摄时刻 ego pose；裁剪后同步调整内参。LiDAR 使用对应 sample 的 `LIDAR_TOP`，由 nuScenes SDK 根据 LiDAR 与相机各自的标定和 ego pose 投影，再映射到裁剪后的图像。动态掩码也使用对应相机投影。多相机输出名称包含相机名，避免相互覆盖。
+
+```bash
+python -m src.main +experiment=stage3
+# 恢复单路 CAM_FRONT
+python -m src.main +experiment=stage3 dataset.camera_names=null dataset.camera_name=CAM_FRONT
+```
+
+其他 stage 默认保留单相机行为，也可以通过 `dataset.camera_names` 指定相机列表。
+
 ### LiDAR 监督截断前的逆深度
 
 nuScenes 实验的 loss 列表已加入 `lidar_inverse_depth`：
@@ -341,9 +355,13 @@ PSNR/SSIM 越高越好，LPIPS 越低越好。
 | Stage 0 | — | 无（直接推理） | 17.4256 | 0.4068 | 0.3872 | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 | Stage 1 | cross_visual_depth | `depth_predictor.to_disparity` | 20.4386 | 0.5668 | 0.3083 | <img src="outputs/test/stage1/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 | Stage 2 | context_rgb | `depth_predictor.lidar_gaussians` | 20.8392 | 0.5738 | 0.2939 | <img src="outputs/test/stage2/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
-| Stage 3 | cross_visual_depth, lidar_inverse_depth, context_rgb | `depth_predictor.depth_head_lowres`、`depth_predictor.refine_unet`、`depth_predictor.to_disparity`、`depth_predictor.to_gaussians` | **21.4204** | **0.6007** | **0.2771** | <img src="outputs/test/stage3/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
+| Stage 3 | cross_visual_depth, lidar_inverse_depth, context_rgb | `depth_predictor.depth_head_lowres`、`depth_predictor.refine_unet`、`depth_predictor.to_disparity`、`depth_predictor.to_gaussians` | 21.4204 | 0.6007 | 0.2771 | <img src="outputs/test/stage3/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
+| Stage 4 | cross_visual_depth, lidar_inverse_depth, context_rgb | `all` | **21.7153** | **0.6168** | **0.2585** | <img src="outputs/test/stage4/scene-0103_CAM_FRONT_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 
-
+stage 5
+psnr 19.43656193952024
+ssim 0.4990513013167815
+lpips 0.372023306948282
 
 ## 10. 致谢与引用
 

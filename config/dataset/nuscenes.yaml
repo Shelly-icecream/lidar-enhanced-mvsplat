@@ -22,6 +22,8 @@ far: 80.0
 use_keyframe_only: true
 
 camera_name: CAM_FRONT
+# null preserves the single-camera setting above.
+camera_names: null
 num_context_views: 2
 num_target_views: 1
 frame_stride: 1

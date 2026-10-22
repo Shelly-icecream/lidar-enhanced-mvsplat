@@ -41,6 +41,8 @@ class DatasetNuScenesCfg(DatasetCfgCommon):
     load_lidar_depth: bool = False
 
     camera_name: str = "CAM_FRONT"
+    # Each selected camera contributes independent two-context temporal windows.
+    camera_names: list[str] | None = None
     num_context_views: int = 2
     num_target_views: int = 1
     frame_stride: int = 1
@@ -170,23 +172,7 @@ class DatasetNuScenes(IterableDataset):
         return dynamic_mask
 
     def _build_index(self) -> list[dict]:
-        """
-        Build temporal windows on a single camera stream, e.g. CAM_FRONT.
-
-        【修改后】
-        Each item explicitly stores:
-            context_sample_tokens = [t-s, t+s]
-            target_sample_tokens  = [t]
-
-        For example:
-            num_context_views = 2
-            num_target_views  = 1
-            frame_stride      = 1
-
-        Then:
-            context = [t-1, t+1]
-            target  = [t]
-        """
+        """Build temporal windows per camera, keeping calibration streams separate."""
         split_scenes = create_splits_scenes()
 
         if self.cfg.version == "v1.0-mini":
@@ -207,7 +193,17 @@ class DatasetNuScenes(IterableDataset):
                 raise ValueError(f"Unknown stage: {self.stage}")
 
         items = []
-        camera_name = self.cfg.camera_name
+        camera_names = getattr(self.cfg, "camera_names", None)
+        if camera_names is None:
+            camera_names = [self.cfg.camera_name]
+        supported = {
+            "CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT",
+            "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT",
+        }
+        if not camera_names or len(set(camera_names)) != len(camera_names):
+            raise ValueError("camera_names must be nonempty and contain no duplicates.")
+        if set(camera_names) - supported:
+            raise ValueError(f"Unsupported nuScenes cameras: {set(camera_names) - supported}")
 
         num_context = self.cfg.num_context_views
         num_target = self.cfg.num_target_views
@@ -232,46 +228,48 @@ class DatasetNuScenes(IterableDataset):
             if scene_name not in allowed_scene_names:
                 continue
 
-            # Traverse sample chain of this scene.
-            sample_tokens = []
-            token = scene["first_sample_token"]
-            while token != "":
-                sample = self.nusc.get("sample", token)
+            for camera_name in camera_names:
+                # Traverse sample chain of this scene.
+                sample_tokens = []
+                token = scene["first_sample_token"]
+                while token != "":
+                    sample = self.nusc.get("sample", token)
 
-                if camera_name not in sample["data"]:
+                    if camera_name not in sample["data"]:
+                        token = sample["next"]
+                        continue
+
+                    sd_token = sample["data"][camera_name]
+                    sd = self.nusc.get("sample_data", sd_token)
+
+                    # optional: keyframe only
+                    if self.cfg.use_keyframe_only and not sd["is_key_frame"]:
+                        token = sample["next"]
+                        continue
+
+                    sample_tokens.append(token)
                     token = sample["next"]
-                    continue
 
-                sd_token = sample["data"][camera_name]
-                sd = self.nusc.get("sample_data", sd_token)
+                # num_context=2, stride=1: context=[t-1, t+1], target=[t].
+                # num_context=2, stride=2: context=[t-2, t+2], target=[t].
+                # Target-centered interpolation: [t-stride, t+stride] -> t.
+                for center in range(stride, len(sample_tokens) - stride):
+                    context_sample_tokens = [
+                        sample_tokens[center - stride],
+                        sample_tokens[center + stride],
+                    ]
 
-                # optional: keyframe only
-                if self.cfg.use_keyframe_only and not sd["is_key_frame"]:
-                    token = sample["next"]
-                    continue
+                    target_sample_tokens = [sample_tokens[center]]
 
-                sample_tokens.append(token)
-                token = sample["next"]
-
-            # num_context=2, stride=1: context=[t-1, t+1], target=[t].
-            # num_context=2, stride=2: context=[t-2, t+2], target=[t].
-            # Target-centered interpolation: [t-stride, t+stride] -> t.
-            for center in range(stride, len(sample_tokens) - stride):
-                context_sample_tokens = [
-                    sample_tokens[center - stride],
-                    sample_tokens[center + stride],
-                ]
-
-                target_sample_tokens = [sample_tokens[center]]
-
-                items.append(
-                    {
-                        "scene_name": scene_name,
-                        "context_sample_tokens": context_sample_tokens,
-                        "target_sample_tokens": target_sample_tokens,
-                        "target_time_index": center,
-                    }
-                )
+                    items.append(
+                        {
+                            "scene_name": scene_name,
+                            "camera_name": camera_name,
+                            "context_sample_tokens": context_sample_tokens,
+                            "target_sample_tokens": target_sample_tokens,
+                            "target_time_index": center,
+                        }
+                    )
 
         return items
 
@@ -306,6 +304,7 @@ class DatasetNuScenes(IterableDataset):
         for idx in indices:
             item = self.items[idx]
             scene_name = item["scene_name"]
+            camera_name = item["camera_name"]
 
             # 【修改】现在 _build_index() 已经显式区分 context / target
             context_sample_tokens = item["context_sample_tokens"]
@@ -325,7 +324,7 @@ class DatasetNuScenes(IterableDataset):
             for sample_token in sample_tokens:
                 sample = self.nusc.get("sample", sample_token)
 
-                cam_sd_token = sample["data"][self.cfg.camera_name]
+                cam_sd_token = sample["data"][camera_name]
 
                 img_tensor, c2w, K = self._load_camera(cam_sd_token)
 
@@ -383,7 +382,11 @@ class DatasetNuScenes(IterableDataset):
                     "far": self.get_bound("far", len(target_indices)),
                     "index": torch.tensor([item["target_time_index"]], dtype=torch.long),
                 },
-                "scene": f"{scene_name}_{sample_tokens[0]}",
+                "scene": (
+                    f"{scene_name}_{camera_name}_{sample_tokens[0]}"
+                    if self.cfg.camera_names is not None
+                    else f"{scene_name}_{sample_tokens[0]}"
+                ),
             }
 
             example = apply_crop_shim(example, tuple(self.cfg.image_shape))
