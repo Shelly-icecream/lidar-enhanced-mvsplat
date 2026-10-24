@@ -358,10 +358,30 @@ PSNR/SSIM 越高越好，LPIPS 越低越好。
 | Stage 3 | cross_visual_depth, lidar_inverse_depth, context_rgb | `depth_predictor.depth_head_lowres`、`depth_predictor.refine_unet`、`depth_predictor.to_disparity`、`depth_predictor.to_gaussians` | 21.4204 | 0.6007 | 0.2771 | <img src="outputs/test/stage3/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 | Stage 4 | cross_visual_depth, lidar_inverse_depth, context_rgb | `all` | **21.7153** | **0.6168** | **0.2585** | <img src="outputs/test/stage4/scene-0103_CAM_FRONT_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 
-stage 5
+s2000 单独
 psnr 19.43656193952024
 ssim 0.4990513013167815
 lpips 0.372023306948282
+
+s22000
+psnr 19.30899829781933
+ssim 0.4950465165820473
+lpips 0.3730573466781414
+
+s26000
+psnr 19.328111184107794
+ssim 0.4989032747296544
+lpips 0.3628457794328789
+
+s46000
+psnr 19.397095246748492
+ssim 0.5057453283822382
+lpips 0.35693269977708914
+
+s80000
+psnr 19.526520522641928
+ssim 0.5117949276711001
+lpips 0.35107805744394077
 
 ## 10. 致谢与引用
 
