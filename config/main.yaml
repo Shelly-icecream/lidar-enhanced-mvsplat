@@ -51,6 +51,8 @@ train:
   enable_depth_losses: false
   depth_mode: null
   extended_visualization: false
+  # Keep evaluation/rendering out of training; use mode=test after training.
+  run_validation: false
   render_validation_video: false
   print_log_every_n_steps: 1
 

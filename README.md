@@ -4,6 +4,8 @@
 
 ## 1. 当前进度
 
+训练默认关闭在线验证（`train.run_validation: false`），不计算每步 PSNR 或输出深度诊断日志；训练所需的 loss 和 checkpoint 保留。训练后用 `mode=test` 统一评测。`outputs` 下的临时 Python 诊断脚本已清理，已有图片、指标、报告及权重保留。需要在线验证时可显式设置 `train.run_validation=true`。
+
 目前仓库包含以下实验配置（旧配置的冻结前缀迁移见下文）：
 
 | 配置 | 作用 | 当前训练目标 |
@@ -360,51 +362,13 @@ PSNR/SSIM 越高越好，LPIPS 越低越好。
 | Stage 3 | cross_visual_depth, lidar_inverse_depth, context_rgb | `depth_predictor.depth_head_lowres`、`depth_predictor.refine_unet`、`depth_predictor.to_disparity`、`depth_predictor.to_gaussians` | 21.4204 | 0.6007 | 0.2771 | <img src="outputs/test/stage3/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 | Stage 4 | cross_visual_depth, lidar_inverse_depth, context_rgb | `all` | **21.7153** | **0.6168** | **0.2585** | <img src="outputs/test/stage4/scene-0103_CAM_FRONT_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
 
-s2000 单独
-psnr 19.43656193952024
-ssim 0.4990513013167815
-lpips 0.372023306948282
 
-s22000
-psnr 19.30899829781933
-ssim 0.4950465165820473
-lpips 0.3730573466781414
-
-s26000
-psnr 19.328111184107794
-ssim 0.4989032747296544
-lpips 0.3628457794328789
-
-s46000
-psnr 19.397095246748492
-ssim 0.5057453283822382
-lpips 0.35693269977708914
-
-s80000
-psnr 19.526520522641928
-ssim 0.5117949276711001
-lpips 0.35107805744394077
-
-new2
-psnr 21.27763657755666
-ssim 0.6013447456545644
-lpips 0.2866920285023652
-
-new3 80000删了三个模块
-psnr 19.558488288483062
-ssim 0.5132158062223232
-lpips 0.3572006556507829
-
-new4 2000
-psnr 19.567882397474147
-ssim 0.5145612015868678
-lpips 0.3569412085336524
-
-new5 2000
-psnr 19.56858086482787
-ssim 0.5136998308685435
-lpips 0.3573093151762372
-
+| 实验 | 增加loss | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | steps |
+| --- | :---: | --- | ---: | ---: | ---: | ---: |
+| baseline | — | 无（直接推理） | 20.1596 | 0.5534 | 0.3652 | 0 |
+| stage 5 | cross_visual_depth, lidar_inverse_depth, context_rgb | `all` | 19.5265 | 0.5118 | 0.3511 | 80000 |
+| stage 6 | cross_visual_depth, lidar_inverse_depth, context_rgb | `all-3 module` | 19.5585 | 0.5132 | 0.3572 | 80000 |
+| stage7 | cross_visual_depth, lidar_inverse_depth, context_rgb | `alternate to_disparity`、`alternate to_gaussians` | 19.5686 | 0.5137 | 0.3573 | 2000 |
 
 ## 10. 致谢与引用
 
