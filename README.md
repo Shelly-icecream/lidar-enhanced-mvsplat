@@ -12,7 +12,9 @@
 | `stage0.yaml` | 加载 RE10K checkpoint | LiDAR Gaussian adapter 关闭，用于推理与消融 |
 | `stage2.yaml` | LiDAR Gaussian 属性修正 | 冻结基础网络，训练 Gaussian adapter |
 
-注意：`baseline/re10k.yaml` 当前仍保留旧冻结项 `depth_predictor.to_disparity`。使用这些配置前，需要将该项替换为 `depth_predictor.to_disparity_disps` 和 `depth_predictor.to_disparity_opacity`，否则 encoder 初始化的严格前缀检查会报错。
+当前实现：`depth_predictor.to_disparity` 是按 context 划分的独立预测头列表。`to_disparity.0` 仅处理 context 0 的 batch 切片，`to_disparity.1` 仅处理 context 1；各头均为 `Conv2d → GELU → Conv2d`，输出本视角的 K 个逆深度残差和 K 个 density 原始值，不含 attention，也不计算另一视角的输出。旧共享头 checkpoint 加载时会将完整权重复制到每个 context 头；新 checkpoint 直接加载。`depth_predictor.to_disparity` 冻结全部头，追加 `.0` 或 `.1` 可分别冻结。共享 backbone/refinement 及其跨视角交互保留，因此独立头不等于完全独立的深度分支。架构变化后应使用权重初始化（`resume: false`），不恢复旧 optimizer 状态。下文旧的 `to_disparity_disps` / `to_disparity_opacity` 说明和流程图描述的是历史实现。
+
+`+experiment=stage5` 启用交替训练：`model.encoder.alternate_context_heads: true` 和 `model.encoder.alternate_context_head_steps: 500`，按 optimizer 的 `global_step` 在头 0（0–499）、头 1（500–999）间循环。冻结范围由 stage5 的 `frozen_params` 显式列出（backbone、upsampler、proj_feature、refine_unet），这些模块保持 eval 模式；交替开关本身不冻结其他模块；未激活头的梯度设为 None，避免 Adam 动量继续更新。两组高斯仍共同参与渲染，现有损失均保留；只允许当前 context 的 `to_disparity` 和 `to_gaussians` 两类头接收梯度。`to_gaussians.0/.1` 分别只处理本视角 batch 切片；旧共享 Gaussian 头的完整权重会复制到两侧，新 checkpoint 直接加载。可用 `frozen_params` 继续冻结任意 Gaussian 头，交替逻辑不会将其解冻。默认继承 stage4 的 `checkpoints/re10k.ckpt` 初始化，可通过 `checkpointing.load=...` 指定已有训练权重。启动示例：`python -m src.main +experiment=stage5`。设置 `alternate_context_heads: false` 关闭交替，两侧同时训练；冻结配置保持独立。
 
 已经完成的主要改动：
 
@@ -382,6 +384,27 @@ s80000
 psnr 19.526520522641928
 ssim 0.5117949276711001
 lpips 0.35107805744394077
+
+new2
+psnr 21.27763657755666
+ssim 0.6013447456545644
+lpips 0.2866920285023652
+
+new3 80000删了三个模块
+psnr 19.558488288483062
+ssim 0.5132158062223232
+lpips 0.3572006556507829
+
+new4 2000
+psnr 19.567882397474147
+ssim 0.5145612015868678
+lpips 0.3569412085336524
+
+new5 2000
+psnr 19.56858086482787
+ssim 0.5136998308685435
+lpips 0.3573093151762372
+
 
 ## 10. 致谢与引用
 

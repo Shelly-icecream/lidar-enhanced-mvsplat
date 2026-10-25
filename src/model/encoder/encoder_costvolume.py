@@ -59,9 +59,12 @@ class EncoderCostVolumeCfg:
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
+    cost_volume_temperature: float = 0.1
     frozen_params: List[str] = field(default_factory=list)
     use_lidar_bias_train: bool = False
     use_lidar_bias_test: bool = False
+    alternate_context_head_steps: int = 0
+    alternate_context_heads: bool = False
 
 
 class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
@@ -114,6 +117,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             feature_channels=cfg.d_feature,
             upscale_factor=cfg.downscale_factor,
             num_depth_candidates=cfg.num_depth_candidates,
+            cost_volume_temperature=cfg.cost_volume_temperature,
             costvolume_unet_feat_dim=cfg.costvolume_unet_feat_dim,
             costvolume_unet_channel_mult=tuple(cfg.costvolume_unet_channel_mult),
             costvolume_unet_attn_res=tuple(cfg.costvolume_unet_attn_res),
@@ -142,6 +146,42 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             for parameter in matched:
                 parameter.requires_grad_(False)
 
+        interval = cfg.alternate_context_head_steps
+        if interval < 0:
+            raise ValueError("alternate_context_head_steps must be nonnegative")
+        if cfg.alternate_context_heads:
+            if interval == 0:
+                raise ValueError("alternate_context_heads requires a positive alternate_context_head_steps")
+            if cfg.wo_depth_refine or len(self.depth_predictor.to_disparity) != 2:
+                raise ValueError("Alternating context heads requires two refined context views")
+            if not all(p.requires_grad for p in self.depth_predictor.to_disparity.parameters()):
+                raise ValueError("Alternating heads must not be included in frozen_params")
+        self._context_head_trainable = {
+            name for name, parameter in self.named_parameters() if parameter.requires_grad
+        }
+        self.train(self.training)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        # Respect configured freezing for running statistics and dropout as well.
+        for prefix in self.cfg.frozen_params:
+            self.get_submodule(prefix).eval()
+        return self
+
+    def select_context_head(self, global_step: int) -> int:
+        """Select by optimizer step, including when resuming or accumulating grads."""
+        active = (global_step // self.cfg.alternate_context_head_steps) % 2
+        for head_name in ("to_disparity", "to_gaussians"):
+            for view, head in enumerate(getattr(self.depth_predictor, head_name)):
+                for name, parameter in head.named_parameters():
+                    full_name = f"depth_predictor.{head_name}.{view}.{name}"
+                    enabled = view == active and full_name in self._context_head_trainable
+                    parameter.requires_grad_(enabled)
+                    if not enabled:
+                        # Adam must skip this parameter, including its momentum/decay.
+                        parameter.grad = None
+        return active
+
     def map_pdf_to_opacity(
         self,
         pdf: Float[Tensor, " *batch"],
@@ -165,6 +205,8 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         visualization_dump: Optional[dict] = None,
         scene_names: Optional[list] = None,
     ) -> Gaussians:
+        if self.training and self.cfg.alternate_context_heads:
+            self.select_context_head(global_step)
         device = context["image"].device
         b, v, _, h, w = context["image"].shape
 

@@ -24,7 +24,7 @@ data_loader:
     persistent_workers: false
 
 trainer:
-  max_steps: 2000
+  max_steps: 80000
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 0.5
@@ -36,15 +36,13 @@ model:
     use_lidar_bias_test: true
 
     num_depth_candidates: 128
-    costvolume_unet_feat_dim: 128
-    costvolume_unet_channel_mult: [1, 1, 1]
-    costvolume_unet_attn_res: [4]
     gaussians_per_pixel: 1
     depth_unet_feat_dim: 32
     depth_unet_attn_res: [16]
     depth_unet_channel_mult: [1, 1, 1, 1, 1]
     unimatch_weights_path: null
 
+    # Raw cost volume -> softmax; train the full-resolution refinement branch.
     frozen_params: []
 
 loss:
@@ -93,8 +91,13 @@ dataset:
   max_fov: 120.0
   use_keyframe_only: true
 
-  camera_names: 
+  camera_names:
     - CAM_FRONT
+    - CAM_FRONT_LEFT
+    - CAM_FRONT_RIGHT
+    - CAM_BACK
+    - CAM_BACK_LEFT
+    - CAM_BACK_RIGHT
   num_context_views: 2
   num_target_views: 1
   frame_stride: 1
@@ -115,6 +118,6 @@ test:
 checkpointing:
   load: checkpoints/re10k.ckpt
   resume: false
-  every_n_train_steps: 200
+  every_n_train_steps: 2000
   save_top_k: -1
   pretrained_model: null

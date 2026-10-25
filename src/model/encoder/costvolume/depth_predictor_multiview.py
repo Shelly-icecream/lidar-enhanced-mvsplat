@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -144,58 +146,20 @@ class DepthPredictorMultiView(nn.Module):
         wo_depth_refine=False,
         wo_cost_volume=False,
         wo_cost_volume_refine=False,
+        cost_volume_temperature=0.1,
         **kwargs,
     ):
         super(DepthPredictorMultiView, self).__init__()
+        if not 0 < cost_volume_temperature < float("inf"):
+            raise ValueError("cost_volume_temperature must be finite and positive.")
+        self.cost_volume_temperature = cost_volume_temperature
         self.num_depth_candidates = num_depth_candidates
-        self.regressor_feat_dim = costvolume_unet_feat_dim
         self.upscale_factor = upscale_factor
-        # ablation settings
-        # Table 3: base
         self.wo_depth_refine = wo_depth_refine
-        # Table 3: w/o cost volume
-        self.wo_cost_volume = wo_cost_volume
-        # Table 3: w/o U-Net
-        self.wo_cost_volume_refine = wo_cost_volume_refine
-
-        # Cost volume refinement: 2D U-Net
-        input_channels = feature_channels if wo_cost_volume else (num_depth_candidates + feature_channels)
-        channels = self.regressor_feat_dim
-        if wo_cost_volume_refine:
-            self.corr_project = nn.Conv2d(input_channels, channels, 3, 1, 1)
-        else:
-            modules = [
-                nn.Conv2d(input_channels, channels, 3, 1, 1),
-                nn.GroupNorm(8, channels),
-                nn.GELU(),
-                UNetModel(
-                    image_size=None,
-                    in_channels=channels,
-                    model_channels=channels,
-                    out_channels=channels,
-                    num_res_blocks=1,
-                    attention_resolutions=costvolume_unet_attn_res,
-                    channel_mult=costvolume_unet_channel_mult,
-                    num_head_channels=32,
-                    dims=2,
-                    postnorm=True,
-                    num_frames=num_views,
-                    use_cross_view_self_attn=True,
-                ),
-                nn.Conv2d(channels, num_depth_candidates, 3, 1, 1)
-            ]
-            self.corr_refine_net = nn.Sequential(*modules)
-            # cost volume u-net skip connection
-            self.regressor_residual = nn.Conv2d(
-                input_channels, num_depth_candidates, 1, 1, 0
-            )
-
-        # Depth estimation: project features to get softmax based coarse depth
-        self.depth_head_lowres = nn.Sequential(
-            nn.Conv2d(num_depth_candidates, num_depth_candidates * 2, 3, 1, 1),
-            nn.GELU(),
-            nn.Conv2d(num_depth_candidates * 2, num_depth_candidates, 3, 1, 1),
-        )
+        if wo_cost_volume:
+            raise ValueError("Direct cost-volume depth requires wo_cost_volume=false.")
+        # Legacy costvolume_unet_* and wo_cost_volume_refine arguments are
+        # accepted for existing configs; no learned cost-volume head remains.
 
         # CNN-based feature upsampler
         proj_in_channels = feature_channels + feature_channels
@@ -241,12 +205,15 @@ class DepthPredictorMultiView(nn.Module):
 
         # Gaussians prediction: covariance, color
         gau_in = depth_unet_feat_dim + 3 + feature_channels
-        self.to_gaussians = nn.Sequential(
+        gaussian_head = nn.Sequential(
             nn.Conv2d(gau_in, gaussian_raw_channels * 2, 3, 1, 1),
             nn.GELU(),
             nn.Conv2d(
                 gaussian_raw_channels * 2, gaussian_raw_channels, 3, 1, 1
             ),
+        )
+        self.to_gaussians = nn.ModuleList(
+            [gaussian_head] + [deepcopy(gaussian_head) for _ in range(num_views - 1)]
         )
 
         # Gaussians prediction: centers, opacity
@@ -257,7 +224,40 @@ class DepthPredictorMultiView(nn.Module):
                 nn.GELU(),
                 nn.Conv2d(channels * 2, gaussians_per_pixel * 2, 3, 1, 1),
             ]
-            self.to_disparity = nn.Sequential(*disps_models)
+            # Each view head sees only its own (v b) batch slice.
+            head = nn.Sequential(*disps_models)
+            self.to_disparity = nn.ModuleList(
+                [head] + [deepcopy(head) for _ in range(num_views - 1)]
+            )
+
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict,
+        missing_keys, unexpected_keys, error_msgs,
+    ):
+        # Old weights can initialize the retained modules with strict checking.
+        # Optimizer-state resume across this architecture change is unsupported.
+        removed = ("corr_refine_net.", "regressor_residual.",
+                   "depth_head_lowres.", "corr_project.")
+        # A legacy shared Conv/GELU/Conv head initializes every view head.
+        head_names = ["to_gaussians"]
+        if not self.wo_depth_refine:
+            head_names.append("to_disparity")
+        for head_name in head_names:
+            for key in list(state_dict):
+                suffix = key.removeprefix(prefix + head_name + ".")
+                if key.startswith(prefix + head_name + ".") and suffix in {
+                    "0.weight", "0.bias", "2.weight", "2.bias",
+                }:
+                    value = state_dict.pop(key)
+                    for view in range(len(getattr(self, head_name))):
+                        state_dict[prefix + f"{head_name}.{view}." + suffix] = value.clone()
+        for key in list(state_dict):
+            if any(key.startswith(prefix + name) for name in removed):
+                del state_dict[key]
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs,
+        )
 
     def forward(
         self,
@@ -291,50 +291,23 @@ class DepthPredictorMultiView(nn.Module):
 
         # cost volume constructions
         feat01 = feat_comb_lists[0]
-        if self.wo_cost_volume:
-            raw_correlation_in = feat01
-        else:
-            raw_correlation_in_lists = []
-            for feat10, pose_curr in zip(feat_comb_lists[1:], pose_curr_lists):
-                # sample feat01 from feat10 via camera projection
-                feat01_warped = warp_with_pose_depth_candidates(
-                    feat10,
-                    intr_curr,
-                    pose_curr,
-                    1.0 / disp_candi_curr.repeat([1, 1, *feat10.shape[-2:]]),
-                    warp_padding_mode="zeros",
-                )  # [B, C, D, H, W]
-                # calculate similarity
-                raw_correlation_in = (feat01.unsqueeze(2) * feat01_warped).sum(
-                    1
-                ) / (
-                    c**0.5
-                )  # [vB, D, H, W]
-                raw_correlation_in_lists.append(raw_correlation_in)
-            # average all cost volumes
-            raw_correlation_in = torch.mean(
-                torch.stack(raw_correlation_in_lists, dim=0), dim=0, keepdim=False
-            )  # [vxb d, h, w]
-            raw_correlation_in = torch.cat((raw_correlation_in, feat01), dim=1)
-
-        # refine cost volume via 2D u-net
-        if self.wo_cost_volume_refine:
-            raw_correlation = self.corr_project(raw_correlation_in)
-        else:
-            raw_correlation = self.corr_refine_net(raw_correlation_in)  # (vb d h w)
-            # apply skip connection
-            raw_correlation = raw_correlation + self.regressor_residual(
-                raw_correlation_in
+        correlations = []
+        for feat10, pose_curr in zip(feat_comb_lists[1:], pose_curr_lists):
+            warped = warp_with_pose_depth_candidates(
+                feat10,
+                intr_curr,
+                pose_curr,
+                1.0 / disp_candi_curr.repeat([1, 1, *feat10.shape[-2:]]),
+                warp_padding_mode="zeros",
             )
-
-        # softmax to get coarse depth and density
-        pdf = F.softmax(
-            self.depth_head_lowres(raw_correlation), dim=1
-        )  # [2xB, D, H, W]
+            correlations.append((feat01.unsqueeze(2) * warped).sum(1) / (c**0.5))
+        raw_correlation = torch.stack(correlations).mean(dim=0)
+        # Calibrate candidate probabilities directly from feature correlation.
+        pdf = F.softmax(raw_correlation / self.cost_volume_temperature, dim=1)
         coarse_disps = (disp_candi_curr * pdf).sum(
             dim=1, keepdim=True
         )  # (vb, 1, h, w)
-        pdf_max = torch.max(pdf, dim=1, keepdim=True)[0]  # argmax
+        pdf_max = torch.max(pdf, dim=1, keepdim=True)[0]  # maximum probability, not candidate index
         pdf_max = F.interpolate(pdf_max, scale_factor=self.upscale_factor)
         fullres_disps = F.interpolate(
             coarse_disps,
@@ -354,7 +327,12 @@ class DepthPredictorMultiView(nn.Module):
         raw_gaussians_in = [refine_out,
                             extra_info["images"], proj_feat_in_fullres]
         raw_gaussians_in = torch.cat(raw_gaussians_in, dim=1)
-        raw_gaussians = self.to_gaussians(raw_gaussians_in)
+        if v != len(self.to_gaussians):
+            raise ValueError(f"Expected {len(self.to_gaussians)} context views, got {v}.")
+        raw_gaussians = torch.cat([
+            head(raw_gaussians_in[view * b:(view + 1) * b])
+            for view, head in enumerate(self.to_gaussians)
+        ], dim=0)
         raw_gaussians = rearrange(
             raw_gaussians, "(v b) c h w -> b v (h w) c", v=v, b=b
         )
@@ -378,7 +356,14 @@ class DepthPredictorMultiView(nn.Module):
             )
         else:
             # delta fine depth and density
-            delta_disps_density = self.to_disparity(refine_out)
+            if v != len(self.to_disparity):
+                raise ValueError(
+                    f"Expected {len(self.to_disparity)} context views, got {v}."
+                )
+            delta_disps_density = torch.cat([
+                head(refine_out[view * b:(view + 1) * b])
+                for view, head in enumerate(self.to_disparity)
+            ], dim=0)
             delta_disps, raw_densities = delta_disps_density.split(
                 gaussians_per_pixel, dim=1
             )

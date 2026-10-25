@@ -6,6 +6,7 @@ opacity_mapping:
   warm_up: 1
 
 num_depth_candidates: 32
+cost_volume_temperature: 0.1
 num_surfaces: 1
 
 gaussians_per_pixel: 1
@@ -25,6 +26,7 @@ visualizer:
 # params for multi-view depth predictor
 unimatch_weights_path: "checkpoints/gmdepth-scale1-resumeflowthings-scannet-5d9d7964.pth"
 multiview_trans_attn_split: 2
+# Legacy config keys; the cost-volume refinement/head has been removed.
 costvolume_unet_feat_dim: 128
 costvolume_unet_channel_mult: [1,1,1]
 costvolume_unet_attn_res: []
@@ -36,9 +38,9 @@ shim_patch_size: 4
 
 # below are ablation settings, keep them as false for default model
 wo_depth_refine: false         # Table 3: base
-wo_cost_volume: false          # Table 3: w/o cost volume
+wo_cost_volume: false          # Must remain false for direct cost-volume depth
 wo_backbone_cross_attn: false  # Table 3: w/o cross-view attention
-wo_cost_volume_refine: false   # Table 3: w/o U-Net
+wo_cost_volume_refine: false   # Legacy no-op; raw cost volume is always used
 use_epipolar_trans: false      # Table B: w/ Epipolar Transformer
 
 # LiDAR guidance
@@ -60,4 +62,7 @@ lidar_gaussian_adapter_alpha_weight: 0.1
 lidar_gaussian_context_render_weight: 0.0
 # Optional encoder parameter prefixes to freeze; [] leaves all parameters trainable.
 frozen_params: []
+# Synchronize disparity/Gaussian head alternation; freezing is set in frozen_params.
+alternate_context_heads: false
+alternate_context_head_steps: 0
 lidar_gaussian_gate_kernel: 5
