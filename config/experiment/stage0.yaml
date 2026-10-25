@@ -7,7 +7,7 @@ defaults:
 wandb:
   name: nuscenes_re10k_pre_adapter
   tags: [nuscenes, re10k, pre_adapter]
-  mode: online
+  mode: disabled
 
 data_loader:
   train:
@@ -33,8 +33,8 @@ trainer:
 model:
   encoder:
     # Hard LiDAR Z-depth replacement after depth refinement.
-    use_lidar_bias_train: true
-    use_lidar_bias_test: true
+    use_lidar_bias_train: false
+    use_lidar_bias_test: false
     num_depth_candidates: 128
     costvolume_unet_feat_dim: 128
     costvolume_unet_channel_mult: [1, 1, 1]
@@ -79,7 +79,13 @@ dataset:
   max_fov: 120.0
   use_keyframe_only: true
 
-  camera_name: CAM_FRONT
+  camera_names:
+    - CAM_FRONT
+    - CAM_FRONT_LEFT
+    - CAM_FRONT_RIGHT
+    - CAM_BACK
+    - CAM_BACK_LEFT
+    - CAM_BACK_RIGHT
   num_context_views: 2
   num_target_views: 1
   frame_stride: 1
