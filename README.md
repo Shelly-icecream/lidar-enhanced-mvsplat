@@ -365,7 +365,7 @@ PSNR/SSIM 越高越好，LPIPS 越低越好。
 
 | 实验 | 增加loss | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | steps |
 | --- | :---: | --- | ---: | ---: | ---: | ---: |
-| baseline | — | 无（直接推理） |
+| baseline | — | 无（直接推理） | 16.5381 | 0.3556 | 0.4689 | 0 |
 | stage 0 | — | 无（直接推理） | 20.1596 | 0.5534 | 0.3652 | 0 |
 | stage 4 | cross_visual_depth, lidar_inverse_depth, context_rgb | `all` | 19.5265 | 0.5118 | 0.3511 | 80000 | stage5.ckpt |
 | stage 4 | cross_visual_depth, lidar_inverse_depth, context_rgb | `all-3 module` | 19.5585 | 0.5132 | 0.3572 | 80000 | stage6.ckpt |
