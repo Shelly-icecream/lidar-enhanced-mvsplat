@@ -81,7 +81,13 @@ dataset:
   max_fov: 120.0
   use_keyframe_only: true
 
-  camera_name: CAM_FRONT
+  camera_names:
+    - CAM_FRONT
+    - CAM_FRONT_LEFT
+    - CAM_FRONT_RIGHT
+    - CAM_BACK
+    - CAM_BACK_LEFT
+    - CAM_BACK_RIGHT
   num_context_views: 2
   num_target_views: 1
   frame_stride: 1
