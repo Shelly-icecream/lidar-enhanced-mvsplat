@@ -24,7 +24,7 @@ data_loader:
     persistent_workers: false
 
 trainer:
-  max_steps: 2000
+  max_steps: 80000
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 0.5
@@ -47,11 +47,7 @@ model:
     # Steps 0..499: context 0; 500..999: context 1; repeat by optimizer step.
     alternate_context_head_steps: 500
     # Freeze shared features; disparity and Gaussian heads alternate together.
-    frozen_params:
-      - backbone
-      - depth_predictor.upsampler
-      - depth_predictor.proj_feature
-      - depth_predictor.refine_unet
+    frozen_params: []
 
 loss:
   # 深度约束
@@ -124,8 +120,8 @@ test:
   save_lidar_alpha_diagnostics: false
 
 checkpointing:
-  load: checkpoints/new3.ckpt
+  load: checkpoints/stage6.ckpt
   resume: false
-  every_n_train_steps: 200
+  every_n_train_steps: 4000
   save_top_k: -1
   pretrained_model: null
