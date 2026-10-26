@@ -115,7 +115,9 @@ def train(cfg_dict: DictConfig):
         enable_progress_bar=cfg.mode == "test",
         gradient_clip_val=cfg.trainer.gradient_clip_val,
         max_steps=cfg.trainer.max_steps,
-        num_sanity_val_steps=cfg.trainer.num_sanity_val_steps,
+        # Offline evaluation is separate from training unless explicitly enabled.
+        limit_val_batches=1.0 if cfg.train.run_validation else 0,
+        num_sanity_val_steps=cfg.trainer.num_sanity_val_steps if cfg.train.run_validation else 0,
     )
     torch.manual_seed(cfg_dict.seed + trainer.global_rank)
 
