@@ -117,8 +117,4 @@ class LossCrossVisualDepth(Loss[LossCrossVisualDepthCfg, LossCrossVisualDepthCfg
                     ratios.append(ratio)
         result = self.cfg.weight * (torch.stack(losses).mean() if losses else depth.nan_to_num().sum() * 0)
         self.diagnostics = {"valid_ratio": torch.stack(ratios).mean() if ratios else depth.new_zeros(())}
-        if self.cfg.print_every_n_steps > 0 and global_step % self.cfg.print_every_n_steps == 0:
-            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-                print(f"cross_visual_depth step {global_step}; loss={result.detach().item():.6f}; "
-                      f"valid_ratio={self.diagnostics['valid_ratio'].item():.4f}")
         return result
