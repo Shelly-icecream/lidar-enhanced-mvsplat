@@ -59,6 +59,7 @@ class EncoderCostVolumeCfg:
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
+    cost_volume_temperature: float = 0.1
     frozen_params: List[str] = field(default_factory=list)
     use_lidar_bias_train: bool = False
     use_lidar_bias_test: bool = False
@@ -114,6 +115,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             feature_channels=cfg.d_feature,
             upscale_factor=cfg.downscale_factor,
             num_depth_candidates=cfg.num_depth_candidates,
+            cost_volume_temperature=cfg.cost_volume_temperature,
             costvolume_unet_feat_dim=cfg.costvolume_unet_feat_dim,
             costvolume_unet_channel_mult=tuple(cfg.costvolume_unet_channel_mult),
             costvolume_unet_attn_res=tuple(cfg.costvolume_unet_attn_res),

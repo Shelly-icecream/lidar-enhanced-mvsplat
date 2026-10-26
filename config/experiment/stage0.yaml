@@ -47,9 +47,6 @@ model:
 
     frozen_params: 
       - backbone
-      - depth_predictor.corr_refine_net
-      - depth_predictor.regressor_residual
-      - depth_predictor.depth_head_lowres
       - depth_predictor.upsampler
       - depth_predictor.proj_feature
       - depth_predictor.refine_unet

@@ -144,58 +144,20 @@ class DepthPredictorMultiView(nn.Module):
         wo_depth_refine=False,
         wo_cost_volume=False,
         wo_cost_volume_refine=False,
+        cost_volume_temperature=0.1,
         **kwargs,
     ):
         super(DepthPredictorMultiView, self).__init__()
+        if not 0 < cost_volume_temperature < float("inf"):
+            raise ValueError("cost_volume_temperature must be finite and positive.")
+        self.cost_volume_temperature = cost_volume_temperature
         self.num_depth_candidates = num_depth_candidates
-        self.regressor_feat_dim = costvolume_unet_feat_dim
         self.upscale_factor = upscale_factor
-        # ablation settings
-        # Table 3: base
         self.wo_depth_refine = wo_depth_refine
-        # Table 3: w/o cost volume
-        self.wo_cost_volume = wo_cost_volume
-        # Table 3: w/o U-Net
-        self.wo_cost_volume_refine = wo_cost_volume_refine
-
-        # Cost volume refinement: 2D U-Net
-        input_channels = feature_channels if wo_cost_volume else (num_depth_candidates + feature_channels)
-        channels = self.regressor_feat_dim
-        if wo_cost_volume_refine:
-            self.corr_project = nn.Conv2d(input_channels, channels, 3, 1, 1)
-        else:
-            modules = [
-                nn.Conv2d(input_channels, channels, 3, 1, 1),
-                nn.GroupNorm(8, channels),
-                nn.GELU(),
-                UNetModel(
-                    image_size=None,
-                    in_channels=channels,
-                    model_channels=channels,
-                    out_channels=channels,
-                    num_res_blocks=1,
-                    attention_resolutions=costvolume_unet_attn_res,
-                    channel_mult=costvolume_unet_channel_mult,
-                    num_head_channels=32,
-                    dims=2,
-                    postnorm=True,
-                    num_frames=num_views,
-                    use_cross_view_self_attn=True,
-                ),
-                nn.Conv2d(channels, num_depth_candidates, 3, 1, 1)
-            ]
-            self.corr_refine_net = nn.Sequential(*modules)
-            # cost volume u-net skip connection
-            self.regressor_residual = nn.Conv2d(
-                input_channels, num_depth_candidates, 1, 1, 0
-            )
-
-        # Depth estimation: project features to get softmax based coarse depth
-        self.depth_head_lowres = nn.Sequential(
-            nn.Conv2d(num_depth_candidates, num_depth_candidates * 2, 3, 1, 1),
-            nn.GELU(),
-            nn.Conv2d(num_depth_candidates * 2, num_depth_candidates, 3, 1, 1),
-        )
+        if wo_cost_volume:
+            raise ValueError("Direct cost-volume depth requires wo_cost_volume=false.")
+        # Legacy costvolume_unet_* and wo_cost_volume_refine arguments are
+        # accepted for existing configs; no learned cost-volume head remains.
 
         # CNN-based feature upsampler
         proj_in_channels = feature_channels + feature_channels
@@ -259,6 +221,22 @@ class DepthPredictorMultiView(nn.Module):
             ]
             self.to_disparity = nn.Sequential(*disps_models)
 
+    def _load_from_state_dict(
+        self, state_dict, prefix, local_metadata, strict,
+        missing_keys, unexpected_keys, error_msgs,
+    ):
+        # Migrate full/shared weights; keep strict checks on all retained modules.
+        # Resume of the old optimizer state is unsupported after pruning.
+        removed = ("corr_refine_net.", "regressor_residual.",
+                   "depth_head_lowres.", "corr_project.")
+        for key in list(state_dict):
+            if any(key.startswith(prefix + name) for name in removed):
+                del state_dict[key]
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict,
+            missing_keys, unexpected_keys, error_msgs,
+        )
+
     def forward(
         self,
         features,
@@ -291,46 +269,19 @@ class DepthPredictorMultiView(nn.Module):
 
         # cost volume constructions
         feat01 = feat_comb_lists[0]
-        if self.wo_cost_volume:
-            raw_correlation_in = feat01
-        else:
-            raw_correlation_in_lists = []
-            for feat10, pose_curr in zip(feat_comb_lists[1:], pose_curr_lists):
-                # sample feat01 from feat10 via camera projection
-                feat01_warped = warp_with_pose_depth_candidates(
-                    feat10,
-                    intr_curr,
-                    pose_curr,
-                    1.0 / disp_candi_curr.repeat([1, 1, *feat10.shape[-2:]]),
-                    warp_padding_mode="zeros",
-                )  # [B, C, D, H, W]
-                # calculate similarity
-                raw_correlation_in = (feat01.unsqueeze(2) * feat01_warped).sum(
-                    1
-                ) / (
-                    c**0.5
-                )  # [vB, D, H, W]
-                raw_correlation_in_lists.append(raw_correlation_in)
-            # average all cost volumes
-            raw_correlation_in = torch.mean(
-                torch.stack(raw_correlation_in_lists, dim=0), dim=0, keepdim=False
-            )  # [vxb d, h, w]
-            raw_correlation_in = torch.cat((raw_correlation_in, feat01), dim=1)
-
-        # refine cost volume via 2D u-net
-        if self.wo_cost_volume_refine:
-            raw_correlation = self.corr_project(raw_correlation_in)
-        else:
-            raw_correlation = self.corr_refine_net(raw_correlation_in)  # (vb d h w)
-            # apply skip connection
-            raw_correlation = raw_correlation + self.regressor_residual(
-                raw_correlation_in
+        correlations = []
+        for feat10, pose_curr in zip(feat_comb_lists[1:], pose_curr_lists):
+            warped = warp_with_pose_depth_candidates(
+                feat10,
+                intr_curr,
+                pose_curr,
+                1.0 / disp_candi_curr.repeat([1, 1, *feat10.shape[-2:]]),
+                warp_padding_mode="zeros",
             )
-
-        # softmax to get coarse depth and density
-        pdf = F.softmax(
-            self.depth_head_lowres(raw_correlation), dim=1
-        )  # [2xB, D, H, W]
+            correlations.append((feat01.unsqueeze(2) * warped).sum(1) / (c**0.5))
+        raw_correlation = torch.stack(correlations).mean(dim=0)
+        # Calibrate candidate probabilities directly from feature correlation.
+        pdf = F.softmax(raw_correlation / self.cost_volume_temperature, dim=1)
         coarse_disps = (disp_candi_curr * pdf).sum(
             dim=1, keepdim=True
         )  # (vb, 1, h, w)

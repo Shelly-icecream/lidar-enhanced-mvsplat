@@ -1,5 +1,7 @@
 # LiDAR-Enhanced MVSplat
 
+当前 `pruned_shared` 分支：删除 `corr_refine_net`、`regressor_residual`、`depth_head_lowres`，与 `pruned_split_alternating` 一致使用原始 cost-volume 相关性除以 `cost_volume_temperature`（默认 0.1）后做 softmax。`to_disparity` 和 `to_gaussians` 仍为两个 context 共享的头，无拆头和交替训练。旧 full/shared 权重加载时仅忽略被删除模块的参数，其余参数仍严格检查；跨架构初始化使用 `checkpointing.resume=false`，不恢复旧 optimizer 状态。
+
 本项目基于 [MVSplat](https://github.com/donydchen/mvsplat) 开发，面向 nuScenes 时序多视角输入，将稀疏 LiDAR 引入 cost-volume 深度预测和 3D Gaussian 属性预测。当前实现包含 LiDAR 深度锚点、深度分支微调与 Gaussian 属性修正。
 
 ## 1. 当前进度
