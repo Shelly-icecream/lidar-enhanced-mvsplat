@@ -140,8 +140,6 @@ class ModelWrapper(LightningModule):
             (h, w),
             depth_mode=self.train_cfg.depth_mode,
         )
-
-
         # Compute and log loss.
         context_output = None
         if any(isinstance(loss_fn, LossContextRgb) for loss_fn in self.losses):
@@ -157,6 +155,11 @@ class ModelWrapper(LightningModule):
                 depth_mode=None,
             )
         total_loss = 0
+        for loss_fn in self.losses:
+            prediction = context_output if isinstance(loss_fn, LossContextRgb) else output
+            loss = loss_fn.forward(prediction, batch, gaussians, self.global_step)
+            self.log(f"loss/{loss_fn.name}", loss)
+            total_loss = total_loss + loss
         self.log("loss/total", total_loss)
 
         if (
