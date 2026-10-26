@@ -20,8 +20,6 @@ dataset:
 data_loader:
   # Avoid having to spin up new processes to print out visualizations.
   train:
-  # Keep evaluation/rendering out of training; use mode=test after training.
-  run_validation: false
     num_workers: 10
     persistent_workers: true
     batch_size: 4
@@ -50,6 +48,8 @@ checkpointing:
   resume: true
 
 train:
+  # Keep evaluation/rendering out of training; use mode=test after training.
+  run_validation: false
   use_lidar_bias: null  # 未指定时兼容旧 encoder 配置
   enable_depth_losses: false
   depth_mode: null
