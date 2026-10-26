@@ -33,7 +33,7 @@ def center_crop(
     *_, h_in, w_in = images.shape
     h_out, w_out = shape
 
-    # Note that odd input dimensions induce half-pixel misalignments.
+    # Use the actual integer crop offsets when updating the principal point.
     row = (h_in - h_out) // 2
     col = (w_in - w_out) // 2
 
@@ -44,6 +44,8 @@ def center_crop(
     intrinsics = intrinsics.clone()
     intrinsics[..., 0, 0] *= w_in / w_out  # fx
     intrinsics[..., 1, 1] *= h_in / h_out  # fy
+    intrinsics[..., 0, 2] = (intrinsics[..., 0, 2] * w_in - col) / w_out
+    intrinsics[..., 1, 2] = (intrinsics[..., 1, 2] * h_in - row) / h_out
 
     return images, intrinsics
 
