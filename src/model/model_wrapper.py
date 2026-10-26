@@ -63,6 +63,7 @@ class TrainCfg:
     depth_mode: DepthRenderingMode | None
     extended_visualization: bool
     print_log_every_n_steps: int
+    run_validation: bool = False
 
 
 @runtime_checkable
@@ -137,14 +138,7 @@ class ModelWrapper(LightningModule):
             (h, w),
             depth_mode=self.train_cfg.depth_mode,
         )
-        target_gt = batch["target"]["image"]
 
-        # Compute metrics.
-        psnr_probabilistic = compute_psnr(
-            rearrange(target_gt, "b v c h w -> (b v) c h w"),
-            rearrange(output.color, "b v c h w -> (b v) c h w"),
-        )
-        self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
 
         # Compute and log loss.
         total_loss = 0
@@ -156,6 +150,7 @@ class ModelWrapper(LightningModule):
 
         if (
             self.global_rank == 0
+            and self.train_cfg.print_log_every_n_steps > 0
             and self.global_step % self.train_cfg.print_log_every_n_steps == 0
         ):
             print(
@@ -166,8 +161,6 @@ class ModelWrapper(LightningModule):
                 f"{batch['context']['far'].detach().cpu().numpy().mean()}]; "
                 f"loss = {total_loss:.6f}"
             )
-        self.log("info/near", batch["context"]["near"].detach().cpu().numpy().mean())
-        self.log("info/far", batch["context"]["far"].detach().cpu().numpy().mean())
         self.log("info/global_step", self.global_step)  # hack for ckpt monitor
 
         # Tell the data loader processes about the current step.

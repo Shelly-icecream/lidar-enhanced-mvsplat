@@ -20,6 +20,8 @@ dataset:
 data_loader:
   # Avoid having to spin up new processes to print out visualizations.
   train:
+  # Keep evaluation/rendering out of training; use mode=test after training.
+  run_validation: false
     num_workers: 10
     persistent_workers: true
     batch_size: 4
