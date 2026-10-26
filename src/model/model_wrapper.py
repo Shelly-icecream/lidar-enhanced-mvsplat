@@ -66,6 +66,7 @@ class TrainCfg:
     depth_mode: DepthRenderingMode | None
     extended_visualization: bool
     print_log_every_n_steps: int
+    run_validation: bool = False
 
 
 @runtime_checkable
@@ -255,9 +256,7 @@ class ModelWrapper(LightningModule):
             (h, w),
             depth_mode=self.train_cfg.depth_mode,
         )
-        target_gt = batch["target"]["image"]
 
-        # Compute metrics.
         use_adapter_loss = bool(
             getattr(
                 self.encoder.cfg,
@@ -265,12 +264,6 @@ class ModelWrapper(LightningModule):
                 False,
             )
         )
-        if not use_adapter_loss:
-            psnr_probabilistic = compute_psnr(
-                rearrange(target_gt, "b v c h w -> (b v) c h w"),
-                rearrange(output.color, "b v c h w -> (b v) c h w"),
-            )
-            self.log("train/psnr_probabilistic", psnr_probabilistic.mean())
 
         # Compute and log loss.
         total_loss = 0
@@ -278,8 +271,6 @@ class ModelWrapper(LightningModule):
             for loss_fn in self.losses:
                 loss = loss_fn.forward(output, batch, gaussians, self.global_step)
                 self.log(f"loss/{loss_fn.name}", loss)
-                for name, value in getattr(loss_fn, "diagnostics", {}).items():
-                    self.log(f"loss/{name}", value)
                 total_loss = total_loss + loss
         if use_adapter_loss:
             adapter_losses = self._lidar_gaussian_adapter_losses(
@@ -355,6 +346,7 @@ class ModelWrapper(LightningModule):
 
         if (
             self.global_rank == 0
+            and self.train_cfg.print_log_every_n_steps > 0
             and self.global_step % self.train_cfg.print_log_every_n_steps == 0
         ):
             print(
@@ -373,16 +365,6 @@ class ModelWrapper(LightningModule):
 
         return total_loss
 
-    def on_after_backward(self) -> None:
-        """Report whether optional LiDAR branches receive gradients."""
-        if self.global_rank != 0:
-            return
-        if (
-            self.global_step
-            % self.train_cfg.print_log_every_n_steps
-            != 0
-        ):
-            return
 
     def test_step(self, batch, batch_idx):
         batch: BatchedExample = self.data_shim(batch)
