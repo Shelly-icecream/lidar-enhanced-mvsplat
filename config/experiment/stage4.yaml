@@ -2,7 +2,7 @@
 defaults:
   - override /dataset: nuscenes
   - override /model/encoder: costvolume
-  - override /loss: [mse, lpips, cross_visual_depth, lidar_inverse_depth, context_rgb]
+  - override /loss: [mse, lpips, lidar_inverse_depth, context_rgb]
 
 wandb:
   name: baseline

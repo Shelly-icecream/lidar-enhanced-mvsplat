@@ -46,23 +46,8 @@ use_epipolar_trans: false      # Table B: w/ Epipolar Transformer
 # LiDAR guidance
 use_lidar_bias_train: false
 use_lidar_bias_test: false
-use_lidar_gaussian_adapter: false
-lidar_gaussian_edit_xy: true
-lidar_gaussian_edit_scale: true
-lidar_gaussian_edit_rotation: true
-lidar_gaussian_edit_sh_dc: false
-lidar_gaussian_edit_sh_rest: false
-lidar_gaussian_edit_opacity: false
-lidar_gaussian_opacity_max_delta_logit: 1.0
-use_lidar_gaussian_adapter_loss: false
-lidar_gaussian_adapter_local_rgb_weight: 1.0
-lidar_gaussian_adapter_improvement_weight: 1.0
-lidar_gaussian_adapter_improvement_margin: 0.0
-lidar_gaussian_adapter_alpha_weight: 0.1
-lidar_gaussian_context_render_weight: 0.0
 # Optional encoder parameter prefixes to freeze; [] leaves all parameters trainable.
 frozen_params: []
 # Synchronize disparity/Gaussian head alternation; freezing is set in frozen_params.
 alternate_context_heads: false
 alternate_context_head_steps: 0
-lidar_gaussian_gate_kernel: 5

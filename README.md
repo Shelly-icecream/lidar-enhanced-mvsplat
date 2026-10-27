@@ -353,32 +353,17 @@ loss:
 
 PSNR/SSIM 越高越好，LPIPS 越低越好。
 
-# CAM_FRONT
-
-| 实验 | 增加loss | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | 推理展示（scene-0103） | steps |
-| --- | :---: | --- | ---: | ---: | ---: | :---: | :---: |
-| baseline | — | 无（直接推理） | 17.3907 | 0.4055 | 0.3885 | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> | 0 |
-| Stage 0 | — | 无（直接推理） | 17.4256 | 0.4068 | 0.3872 | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> | 0 |
-| Stage 3 | cross_visual_depth, lidar_inverse_depth, context_rgb | `all` | **21.7153** | **0.6168** | **0.2585** | <img src="outputs/test/stage4/scene-0103_CAM_FRONT_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> | 2000 |
-
 # CAM_6
 
 | 实验 | 增加loss | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | steps |
 | --- | :---: | --- | ---: | ---: | ---: | ---: |
 | baseline_depth_error | — | 无（直接推理） | 20.0636 | 0.5540 | 0.3676 | 0 |
-| stage 0 | — | 无（直接推理） | 20.1596 | 0.5534 | 0.3652 | 0 |
-| stage 4 | cross_visual_depth, lidar_inverse_depth, context_rgb | `all` | 19.5265 | 0.5118 | 0.3511 | 80000 | stage5.ckpt |
-| stage 4 | cross_visual_depth, lidar_inverse_depth, context_rgb | `all-3 module` | 19.5585 | 0.5132 | 0.3572 | 80000 | stage6.ckpt |
-| stage5 | cross_visual_depth, lidar_inverse_depth, context_rgb | `alternate to_disparity`、`alternate to_gaussians` | 19.5686 | 0.5137 | 0.3573 | 2000 | stage7.ckpt |
-psnr 19.5212069569212
-ssim 0.5124255933867389
-lpips 0.3588124669410966
+| baseline | — | 无（直接推理） | 20.1596 | 0.5534 | 0.3652 | 0 |
+| full_shared | lidar_inverse_depth, context_rgb | `all` | 
+| pruned | lidar_inverse_depth, context_rgb | `all-3 module` | 20.3112 | 0.5555 | 0.3351 | 40000 | .ckpt |
+| pruned_split_alternating | lidar_inverse_depth, context_rgb | `all-3module+to_disparity+to_gaussians` |
 
-2000
-psnr 19.593105716622752
-ssim 0.5156231638350528
-lpips 0.35684991856932124
-all-3module+to_disparity+to_gaussians
+
 
 ## 10. 致谢与引用
 
