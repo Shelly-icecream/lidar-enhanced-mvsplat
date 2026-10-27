@@ -2,7 +2,7 @@
 defaults:
   - override /dataset: nuscenes
   - override /model/encoder: costvolume
-  - override /loss: [mse, lpips, cross_visual_depth, lidar_inverse_depth, context_rgb]
+  - override /loss: [mse, lpips, lidar_inverse_depth, context_rgb]
 
 wandb:
   name: alternating_context_heads
@@ -24,7 +24,7 @@ data_loader:
     persistent_workers: false
 
 trainer:
-  max_steps: 80000
+  max_steps: 2000
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 0.5
@@ -42,26 +42,21 @@ model:
     depth_unet_channel_mult: [1, 1, 1, 1, 1]
     unimatch_weights_path: null
 
-    # 同步交替两个头：true 开启，false 两个 context 同时训练。
     alternate_context_heads: true
-    # Steps 0..499: context 0; 500..999: context 1; repeat by optimizer step.
     alternate_context_head_steps: 500
-    # Freeze shared features; disparity and Gaussian heads alternate together.
-    frozen_params: []
+    
+    frozen_params: 
+      - backbone
+      - depth_predictor.upsampler
+      - depth_predictor.proj_feature
+      - depth_predictor.refine_unet
 
 loss:
   # 深度约束
   lidar_inverse_depth: # 很重要，要不然深度会退化
     weight: 1.0
     beta: 0.01
-  cross_visual_depth:
-    print_every_n_steps: 50
-    color_threshold: 0.1
-    weight: 1.0
-    beta: 0.01
-    reprojection_threshold_px: 5.0
-    relative_depth_threshold: 0.20
-  
+
   # 结构约束
   lpips:
     apply_after_step: 0
@@ -120,8 +115,8 @@ test:
   save_lidar_alpha_diagnostics: false
 
 checkpointing:
-  load: checkpoints/stage6.ckpt
+  load: checkpoints/.ckpt
   resume: false
-  every_n_train_steps: 4000
+  every_n_train_steps: 200
   save_top_k: -1
   pretrained_model: null

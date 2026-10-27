@@ -42,7 +42,8 @@ model:
     depth_unet_channel_mult: [1, 1, 1, 1, 1]
     unimatch_weights_path: null
 
-    # Raw cost volume -> softmax; train the full-resolution refinement branch.
+    alternate_context_heads: false
+
     frozen_params: []
 
 loss:
@@ -50,13 +51,6 @@ loss:
   lidar_inverse_depth: # 很重要，要不然深度会退化
     weight: 1.0
     beta: 0.01
-  cross_visual_depth:
-    print_every_n_steps: 50
-    color_threshold: 0.1
-    weight: 1.0
-    beta: 0.01
-    reprojection_threshold_px: 5.0
-    relative_depth_threshold: 0.20
   
   # 结构约束
   lpips:

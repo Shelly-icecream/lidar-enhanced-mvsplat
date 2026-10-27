@@ -332,7 +332,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 opacity_multiplier * gaussians.opacities,
                 "b v r srf spp -> b (v r srf spp)",
             ),
-            context_depth=depths.mean(dim=(-1, -2)).reshape(b, v, h, w),
             raw_context_inverse_depth=extra_info["raw_context_inverse_depth"],
         )
 
