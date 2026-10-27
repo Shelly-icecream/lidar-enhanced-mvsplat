@@ -114,6 +114,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
 
         # cost volume based depth predictor
         self.depth_predictor = DepthPredictorMultiView(
+            alternate_context_heads=cfg.alternate_context_heads,
             feature_channels=cfg.d_feature,
             upscale_factor=cfg.downscale_factor,
             num_depth_candidates=cfg.num_depth_candidates,

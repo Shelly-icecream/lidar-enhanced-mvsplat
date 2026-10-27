@@ -147,11 +147,13 @@ class DepthPredictorMultiView(nn.Module):
         wo_cost_volume=False,
         wo_cost_volume_refine=False,
         cost_volume_temperature=0.1,
+        alternate_context_heads=False,
         **kwargs,
     ):
         super(DepthPredictorMultiView, self).__init__()
         if not 0 < cost_volume_temperature < float("inf"):
             raise ValueError("cost_volume_temperature must be finite and positive.")
+        self.alternate_context_heads = alternate_context_heads
         self.cost_volume_temperature = cost_volume_temperature
         self.num_depth_candidates = num_depth_candidates
         self.upscale_factor = upscale_factor
@@ -214,7 +216,7 @@ class DepthPredictorMultiView(nn.Module):
         )
         self.to_gaussians = nn.ModuleList(
             [gaussian_head] + [deepcopy(gaussian_head) for _ in range(num_views - 1)]
-        )
+        ) if alternate_context_heads else gaussian_head
 
         # Gaussians prediction: centers, opacity
         if not wo_depth_refine:
@@ -228,7 +230,7 @@ class DepthPredictorMultiView(nn.Module):
             head = nn.Sequential(*disps_models)
             self.to_disparity = nn.ModuleList(
                 [head] + [deepcopy(head) for _ in range(num_views - 1)]
-            )
+            ) if alternate_context_heads else head
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict,
@@ -243,6 +245,15 @@ class DepthPredictorMultiView(nn.Module):
         if not self.wo_depth_refine:
             head_names.append("to_disparity")
         for head_name in head_names:
+            if not self.alternate_context_heads:
+                if any(key.startswith(prefix + head_name + ".0.0.") for key in state_dict):
+                    error_msgs.append(
+                        f"{prefix}{head_name}: split-head checkpoint cannot load into a shared head. "
+                        "Set alternate_context_heads=true to evaluate the original split model; "
+                        "initialize shared-head training from a shared checkpoint (e.g. re10k.ckpt). "
+                        "Split heads cannot be merged without changing model behavior."
+                    )
+                continue
             for key in list(state_dict):
                 suffix = key.removeprefix(prefix + head_name + ".")
                 if key.startswith(prefix + head_name + ".") and suffix in {
@@ -258,6 +269,16 @@ class DepthPredictorMultiView(nn.Module):
             state_dict, prefix, local_metadata, strict,
             missing_keys, unexpected_keys, error_msgs,
         )
+
+    def _apply_context_head(self, head, features, batch_size, num_views):
+        if not self.alternate_context_heads:
+            return head(features)
+        if num_views != len(head):
+            raise ValueError(f"Expected {len(head)} context views, got {num_views}.")
+        return torch.cat([
+            view_head(features[view * batch_size:(view + 1) * batch_size])
+            for view, view_head in enumerate(head)
+        ], dim=0)
 
     def forward(
         self,
@@ -327,12 +348,7 @@ class DepthPredictorMultiView(nn.Module):
         raw_gaussians_in = [refine_out,
                             extra_info["images"], proj_feat_in_fullres]
         raw_gaussians_in = torch.cat(raw_gaussians_in, dim=1)
-        if v != len(self.to_gaussians):
-            raise ValueError(f"Expected {len(self.to_gaussians)} context views, got {v}.")
-        raw_gaussians = torch.cat([
-            head(raw_gaussians_in[view * b:(view + 1) * b])
-            for view, head in enumerate(self.to_gaussians)
-        ], dim=0)
+        raw_gaussians = self._apply_context_head(self.to_gaussians, raw_gaussians_in, b, v)
         raw_gaussians = rearrange(
             raw_gaussians, "(v b) c h w -> b v (h w) c", v=v, b=b
         )
@@ -356,14 +372,7 @@ class DepthPredictorMultiView(nn.Module):
             )
         else:
             # delta fine depth and density
-            if v != len(self.to_disparity):
-                raise ValueError(
-                    f"Expected {len(self.to_disparity)} context views, got {v}."
-                )
-            delta_disps_density = torch.cat([
-                head(refine_out[view * b:(view + 1) * b])
-                for view, head in enumerate(self.to_disparity)
-            ], dim=0)
+            delta_disps_density = self._apply_context_head(self.to_disparity, refine_out, b, v)
             delta_disps, raw_densities = delta_disps_density.split(
                 gaussians_per_pixel, dim=1
             )

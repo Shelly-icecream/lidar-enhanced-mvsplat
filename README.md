@@ -14,9 +14,10 @@
 | `stage0.yaml` | 加载 RE10K checkpoint | LiDAR Gaussian adapter 关闭，用于推理与消融 |
 | `stage2.yaml` | LiDAR Gaussian 属性修正 | 冻结基础网络，训练 Gaussian adapter |
 
-当前实现：`depth_predictor.to_disparity` 是按 context 划分的独立预测头列表。`to_disparity.0` 仅处理 context 0 的 batch 切片，`to_disparity.1` 仅处理 context 1；各头均为 `Conv2d → GELU → Conv2d`，输出本视角的 K 个逆深度残差和 K 个 density 原始值，不含 attention，也不计算另一视角的输出。旧共享头 checkpoint 加载时会将完整权重复制到每个 context 头；新 checkpoint 直接加载。`depth_predictor.to_disparity` 冻结全部头，追加 `.0` 或 `.1` 可分别冻结。共享 backbone/refinement 及其跨视角交互保留，因此独立头不等于完全独立的深度分支。架构变化后应使用权重初始化（`resume: false`），不恢复旧 optimizer 状态。下文旧的 `to_disparity_disps` / `to_disparity_opacity` 说明和流程图描述的是历史实现。
+当前实现：`alternate_context_heads` 同时决定预测头结构和交替训练。`false`（stage4）时，`to_disparity` 和 `to_gaussians` 各为一个共享的 `Conv2d → GELU → Conv2d`，一次处理两路 context 的 batch；不拆分，不交替。`true`（stage5）时，两类预测头分别拆为 `.0/.1`，各自只处理对应 context；按 `alternate_context_head_steps: 500` 每 500 个 optimizer step 切换可训练的头，未激活头梯度设为 None，避免 Adam 动量更新。共享 backbone/refinement 保留；共享模块是否冻结只由 `frozen_params` 决定，当前 stage4/stage5 均未显式冻结。
 
-`+experiment=stage5` 启用交替训练：`model.encoder.alternate_context_heads: true` 和 `model.encoder.alternate_context_head_steps: 500`，按 optimizer 的 `global_step` 在头 0（0–499）、头 1（500–999）间循环。冻结范围由 stage5 的 `frozen_params` 显式列出（backbone、upsampler、proj_feature、refine_unet），这些模块保持 eval 模式；交替开关本身不冻结其他模块；未激活头的梯度设为 None，避免 Adam 动量继续更新。两组高斯仍共同参与渲染，现有损失均保留；只允许当前 context 的 `to_disparity` 和 `to_gaussians` 两类头接收梯度。`to_gaussians.0/.1` 分别只处理本视角 batch 切片；旧共享 Gaussian 头的完整权重会复制到两侧，新 checkpoint 直接加载。可用 `frozen_params` 继续冻结任意 Gaussian 头，交替逻辑不会将其解冻。默认继承 stage4 的 `checkpoints/re10k.ckpt` 初始化，可通过 `checkpointing.load=...` 指定已有训练权重。启动示例：`python -m src.main +experiment=stage5`。设置 `alternate_context_heads: false` 关闭交替，两侧同时训练；冻结配置保持独立。
+共享 checkpoint 可直接加载到共享模型，也可复制到交替模型的两个独立头；拆分 checkpoint 只能加载到拆分模型，禁止静默合并。历史 stage4 的 40000 步权重属于拆分模型，复测时需设置 `model.encoder.alternate_context_heads=true model.encoder.alternate_context_head_steps=500`（测试不会交替更新参数）。新 stage4 默认从 `checkpoints/re10k.ckpt` 初始化；架构变化应使用 `checkpointing.resume=false`，不恢复不匹配的 optimizer 状态。stage5 当前初始化路径见其 YAML。下文旧的 `to_disparity_disps` / `to_disparity_opacity` 说明和流程图描述历史实现。
+
 
 已经完成的主要改动：
 
@@ -360,8 +361,9 @@ PSNR/SSIM 越高越好，LPIPS 越低越好。
 | baseline_depth_error | — | 无（直接推理） | 20.0636 | 0.5540 | 0.3676 | 0 |
 | baseline | — | 无（直接推理） | 20.1596 | 0.5534 | 0.3652 | 0 |
 | full_shared | lidar_inverse_depth, context_rgb | `all` | 
-| pruned | lidar_inverse_depth, context_rgb | `all-3 module` | 20.3112 | 0.5555 | 0.3351 | 40000 | .ckpt |
+| pruned | lidar_inverse_depth, context_rgb | `all-3 module` |
 | pruned_split_alternating | lidar_inverse_depth, context_rgb | `all-3module+to_disparity+to_gaussians` |
+
 
 
 

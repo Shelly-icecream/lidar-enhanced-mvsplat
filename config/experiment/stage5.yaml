@@ -24,7 +24,7 @@ data_loader:
     persistent_workers: false
 
 trainer:
-  max_steps: 2000
+  max_steps: 60000
   limit_val_batches: 0
   num_sanity_val_steps: 0
   gradient_clip_val: 0.5
@@ -45,11 +45,7 @@ model:
     alternate_context_heads: true
     alternate_context_head_steps: 500
     
-    frozen_params: 
-      - backbone
-      - depth_predictor.upsampler
-      - depth_predictor.proj_feature
-      - depth_predictor.refine_unet
+    frozen_params: []
 
 loss:
   # 深度约束
@@ -115,8 +111,8 @@ test:
   save_lidar_alpha_diagnostics: false
 
 checkpointing:
-  load: checkpoints/.ckpt
+  load: checkpoints/re10k.ckpt
   resume: false
-  every_n_train_steps: 200
+  every_n_train_steps: 2000
   save_top_k: -1
   pretrained_model: null

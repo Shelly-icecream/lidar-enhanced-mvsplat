@@ -16,6 +16,9 @@ def test_alternating_context_heads():
         config = compose(config_name='main', overrides=['+experiment=stage5'])
     set_cfg(config)
     cfg = load_typed_root_config(config)
+    # Explicit fixture freezing; stage5 itself may train shared upstream modules.
+    cfg.model.encoder.frozen_params = ['backbone', 'depth_predictor.upsampler',
+        'depth_predictor.proj_feature', 'depth_predictor.refine_unet']
     encoder, _ = get_encoder(cfg.model.encoder)
     heads = torch.nn.ModuleList([torch.nn.ModuleList([d, g]) for d, g in zip(
         encoder.depth_predictor.to_disparity, encoder.depth_predictor.to_gaussians)])

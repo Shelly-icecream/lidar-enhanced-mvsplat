@@ -4,7 +4,7 @@ import torch
 from src.model.encoder.costvolume.depth_predictor_multiview import DepthPredictorMultiView
 
 torch.set_num_threads(2)
-model=DepthPredictorMultiView(feature_channels=8,depth_unet_feat_dim=32,gaussian_raw_channels=10,num_views=2,num_depth_candidates=4,depth_unet_channel_mult=(1,),depth_unet_attn_res=())
+model=DepthPredictorMultiView(alternate_context_heads=True,feature_channels=8,depth_unet_feat_dim=32,gaussian_raw_channels=10,num_views=2,num_depth_candidates=4,depth_unet_channel_mult=(1,),depth_unet_attn_res=())
 heads=model.to_disparity
 assert len(heads)==2
 assert all(isinstance(m,(torch.nn.Sequential,torch.nn.Conv2d,torch.nn.GELU)) for head in heads for m in head.modules())
@@ -41,3 +41,25 @@ assert calls==[(0,2),(1,2)],calls
 assert gcalls==[(0,2),(1,2)],gcalls
 assert out[0].shape==(2,2,256,1,1)
 print('PASS: legacy migration, independent storage, equivalent outputs, isolated head gradients, new checkpoint reload, production forward B=2, Conv/GELU only')
+
+# Disabled alternation constructs true shared Sequential heads, with legacy keys.
+shared=DepthPredictorMultiView(feature_channels=8,depth_unet_feat_dim=32,gaussian_raw_channels=10,num_views=2,num_depth_candidates=4,depth_unet_channel_mult=(1,),depth_unet_attn_res=())
+assert isinstance(shared.to_disparity, torch.nn.Sequential)
+assert isinstance(shared.to_gaussians, torch.nn.Sequential)
+shared.load_state_dict(legacy, strict=True)
+assert sum(p.numel() for p in shared.to_disparity.parameters())*2 == sum(p.numel() for p in heads.parameters())
+for name, inp in [('to_disparity', x.detach()), ('to_gaussians', gx)]:
+    head=getattr(shared,name)
+    torch.testing.assert_close(shared._apply_context_head(head,inp,3,2),head(inp))
+shared_calls=[]
+hook=shared.to_disparity.register_forward_pre_hook(lambda m,a: shared_calls.append(a[0].shape[0]))
+shared(torch.rand(b,v,8,4,4),torch.eye(3).repeat(b,v,1,1),pose,torch.ones(b,v),torch.full((b,v),80.),extra_info=extra,cnn_features=torch.rand(b,v,8,4,4))
+assert shared_calls==[4], shared_calls
+hook.remove()
+try:
+    shared.load_state_dict(model.state_dict(),strict=True)
+except RuntimeError as error:
+    assert 'split-head checkpoint' in str(error)
+else:
+    raise AssertionError('Split weights must not silently initialize shared heads')
+print('PASS: disabled alternation uses shared heads, legacy loading, full-view forward, split checkpoint rejection')
