@@ -167,14 +167,7 @@ class ModelWrapper(LightningModule):
             and self.train_cfg.print_log_every_n_steps > 0
             and self.global_step % self.train_cfg.print_log_every_n_steps == 0
         ):
-            print(
-                f"train step {self.global_step}; "
-                f"scene = {[x[:20] for x in batch['scene']]}; "
-                f"context = {batch['context']['index'].tolist()}; "
-                f"bound = [{batch['context']['near'].detach().cpu().numpy().mean()} "
-                f"{batch['context']['far'].detach().cpu().numpy().mean()}]; "
-                f"loss = {total_loss:.6f}"
-            )
+            print(f"train step {self.global_step}; loss = {total_loss:.6f}")
         self.log("info/global_step", self.global_step)  # hack for ckpt monitor
 
         # Tell the data loader processes about the current step.

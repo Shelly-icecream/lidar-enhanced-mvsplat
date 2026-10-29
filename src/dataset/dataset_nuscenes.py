@@ -350,17 +350,6 @@ class DatasetNuScenes(IterableDataset):
             context_images = images[context_indices]
             target_images = images[target_indices]
 
-            if self.cfg.skip_bad_shape:
-                context_image_invalid = context_images.ndim != 4
-                target_image_invalid = target_images.ndim != 4
-                if context_image_invalid or target_image_invalid:
-                    print(
-                        f"Skipped bad example {scene_name}. "
-                        f"Context shape={context_images.shape}, "
-                        f"Target shape={target_images.shape}"
-                    )
-                    continue
-
             example = {
                 "context": {
                     "extrinsics": extrinsics[context_indices],

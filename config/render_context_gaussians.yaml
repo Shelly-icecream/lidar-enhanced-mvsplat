@@ -1,6 +1,6 @@
 defaults:
   - main
-  - experiment: stage2
+  - experiment: full_shared
   - _self_
 
 mode: test
