@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Optional, List
 
 import torch
@@ -18,6 +18,7 @@ from .backbone import (
 from .common.gaussian_adapter import GaussianAdapter, GaussianAdapterCfg
 from .encoder import Encoder
 from .costvolume.depth_predictor_multiview import DepthPredictorMultiView
+from .costvolume.lidar_bias import replace_depth_with_lidar
 from .visualization.encoder_visualizer_costvolume_cfg import EncoderVisualizerCostVolumeCfg
 
 from ...global_cfg import get_cfg
@@ -58,24 +59,9 @@ class EncoderCostVolumeCfg:
     wo_backbone_cross_attn: bool
     wo_cost_volume_refine: bool
     use_epipolar_trans: bool
-    use_lidar_bias: bool
-    use_lidar_gaussian_adapter: bool
-    lidar_gaussian_edit_xy: bool
-    lidar_gaussian_edit_scale: bool
-    lidar_gaussian_edit_rotation: bool
-    lidar_gaussian_edit_sh_dc: bool
-    lidar_gaussian_edit_sh_rest: bool
-    lidar_gaussian_edit_opacity: bool
-    lidar_gaussian_opacity_max_delta_logit: float
-    use_lidar_gaussian_adapter_loss: bool
-    lidar_gaussian_adapter_local_rgb_weight: float
-    lidar_gaussian_adapter_improvement_weight: float
-    lidar_gaussian_adapter_improvement_margin: float
-    lidar_gaussian_adapter_alpha_weight: float
-    lidar_gaussian_context_render_weight: float
-    frozen_params: list[str]
-    lidar_gaussian_gate_kernel: int
-    split_depth_attribute_branches: bool = False
+    frozen_params: List[str] = field(default_factory=list)
+    use_lidar_bias_train: bool = False
+    use_lidar_bias_test: bool = False
 
 
 class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
@@ -85,6 +71,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
 
     def __init__(self, cfg: EncoderCostVolumeCfg) -> None:
         super().__init__(cfg)
+
         # multi-view Transformer backbone
         if cfg.use_epipolar_trans:
             self.epipolar_sampler = EpipolarSampler(
@@ -131,7 +118,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             costvolume_unet_channel_mult=tuple(cfg.costvolume_unet_channel_mult),
             costvolume_unet_attn_res=tuple(cfg.costvolume_unet_attn_res),
             gaussian_raw_channels=cfg.num_surfaces * (self.gaussian_adapter.d_in + 2),
-            gaussian_channels_per_surface=self.gaussian_adapter.d_in + 2,
             gaussians_per_pixel=cfg.gaussians_per_pixel,
             num_views=get_cfg().dataset.view_sampler.num_context_views,
             depth_unet_feat_dim=cfg.depth_unet_feat_dim,
@@ -140,39 +126,21 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             wo_depth_refine=cfg.wo_depth_refine,
             wo_cost_volume=cfg.wo_cost_volume,
             wo_cost_volume_refine=cfg.wo_cost_volume_refine,
-            
-            use_lidar_bias=cfg.use_lidar_bias,
-            use_lidar_gaussian_adapter=cfg.use_lidar_gaussian_adapter,
-            lidar_gaussian_edit_xy=cfg.lidar_gaussian_edit_xy,
-            lidar_gaussian_edit_scale=cfg.lidar_gaussian_edit_scale,
-            lidar_gaussian_edit_rotation=cfg.lidar_gaussian_edit_rotation,
-            lidar_gaussian_edit_sh_dc=cfg.lidar_gaussian_edit_sh_dc,
-            lidar_gaussian_edit_sh_rest=cfg.lidar_gaussian_edit_sh_rest,
-            lidar_gaussian_edit_opacity=cfg.lidar_gaussian_edit_opacity,
-            lidar_gaussian_opacity_max_delta_logit=(
-                cfg.lidar_gaussian_opacity_max_delta_logit
-            ),
-            lidar_gaussian_gate_kernel=cfg.lidar_gaussian_gate_kernel,
         )
-        if cfg.split_depth_attribute_branches:
-            self.depth_predictor.enable_split_depth_attribute_branches()
-        for frozen_prefix in cfg.frozen_params:
-            matched_parameters = []
-            for name, param in self.named_parameters():
-                if name == frozen_prefix or name.startswith(f"{frozen_prefix}."):
-                    param.requires_grad_(False)
-                    matched_parameters.append(name)
-            if not matched_parameters:
-                raise ValueError(
-                    "No encoder parameters matched frozen prefix "
-                    f"{frozen_prefix!r}."
-                )
-            if get_cfg().mode == "train":
-                print(
-                    "==> Freeze encoder parameters: "
-                    f"{frozen_prefix} ({len(matched_parameters)} tensors)"
-                )
 
+        parameters = dict(self.named_parameters())
+        for prefix in cfg.frozen_params:
+            matched = [
+                parameter
+                for name, parameter in parameters.items()
+                if prefix and (name == prefix or name.startswith(prefix + "."))
+            ]
+            if not matched:
+                raise ValueError(
+                    f"model.encoder.frozen_params prefix {prefix!r} matches no parameters"
+                )
+            for parameter in matched:
+                parameter.requires_grad_(False)
 
     def map_pdf_to_opacity(
         self,
@@ -196,7 +164,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         deterministic: bool = False,
         visualization_dump: Optional[dict] = None,
         scene_names: Optional[list] = None,
-        
     ) -> Gaussians:
         device = context["image"].device
         b, v, _, h, w = context["image"].shape
@@ -226,12 +193,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         extra_info['images'] = rearrange(context["image"], "b v c h w -> (v b) c h w")
         extra_info["scene_names"] = scene_names
         gpp = self.cfg.gaussians_per_pixel
-        (
-            depths,
-            densities,
-            raw_gaussians,
-            raw_gaussians_base,
-        ) = self.depth_predictor(
+        depths, densities, raw_gaussians = self.depth_predictor(
             in_feats,
             context["intrinsics"],
             context["extrinsics"],
@@ -241,9 +203,20 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             deterministic=deterministic,
             extra_info=extra_info,
             cnn_features=cnn_features,
-            lidar_depth=context.get("lidar_depth", None),
-            lidar_mask=context.get("lidar_mask", None),
         )
+
+        # Replace final refined Z-depth, after to_disparity/clamp and before
+        # Gaussian construction. Both geometry and depth losses see this result.
+        use_lidar_bias = (
+            self.cfg.use_lidar_bias_train if self.training
+            else self.cfg.use_lidar_bias_test
+        )
+        if use_lidar_bias:
+            if "lidar_depth" not in context:
+                raise ValueError("LiDAR bias requires dataset.load_lidar_depth=true.")
+            depths = replace_depth_with_lidar(
+                depths, context["lidar_depth"], context["near"], context["far"]
+            )
 
         # Convert the features and depths into Gaussians.
         xy_ray, _ = sample_image_grid((h, w), device)
@@ -257,19 +230,15 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         pixel_size = 1 / torch.tensor((w, h), dtype=torch.float32, device=device)
         xy_ray = xy_ray + (offset_xy - 0.5) * pixel_size
 
-        # The depth predictor and LiDAR branches use camera z-depth, while the
-        # shared GaussianAdapter multiplies depth by unit-length world rays.
-        # Convert every predicted z-depth to a ray distance using the same
-        # offset pixel coordinates that the adapter uses to construct rays.
+        # The depth predictor uses camera z-depth, while the GaussianAdapter
+        # multiplies depth by unit-length world rays. Convert z-depth to ray
+        # distance using the same offset pixel coordinates as the adapter.
         homogeneous_xy = torch.cat(
             (xy_ray, torch.ones_like(xy_ray[..., :1])),
             dim=-1,
         )
         camera_rays = torch.linalg.solve(
-            rearrange(
-                context["intrinsics"],
-                "b v i j -> b v () () i j",
-            ),
+            rearrange(context["intrinsics"], "b v i j -> b v () () i j"),
             homogeneous_xy.unsqueeze(-1),
         ).squeeze(-1)
         ray_norm = camera_rays.norm(dim=-1, keepdim=True)
@@ -288,75 +257,6 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
             ),
             (h, w),
         )
-        opacity_logit_residual = getattr(
-            self.depth_predictor,
-            "lidar_gaussian_opacity_logit_residual",
-            None,
-        )
-        if opacity_logit_residual is not None:
-            base_opacity = gaussians.opacities.clamp(1e-6, 1.0 - 1e-6)
-            corrected_opacity = torch.sigmoid(
-                torch.logit(base_opacity)
-                + opacity_logit_residual.unsqueeze(-1)
-            )
-            gaussians.opacities = corrected_opacity
-
-        # Adapter-loss baseline: keep the corrected depths and densities, but
-        # remove the Gaussian adapter residual itself.
-        base_gaussians = None
-        if self.cfg.use_lidar_gaussian_adapter_loss:
-            with torch.no_grad():
-                base_raw = rearrange(
-                    raw_gaussians_base,
-                    "... (srf c) -> ... srf c",
-                    srf=self.cfg.num_surfaces,
-                )
-                base_xy_ray, _ = sample_image_grid((h, w), device)
-                base_xy_ray = rearrange(base_xy_ray, "h w xy -> (h w) () xy")
-                base_offset_xy = base_raw[..., :2].sigmoid()
-                base_xy_ray = (
-                    base_xy_ray
-                    + (base_offset_xy - 0.5) * pixel_size
-                )
-                base_homogeneous_xy = torch.cat(
-                    (
-                        base_xy_ray,
-                        torch.ones_like(base_xy_ray[..., :1]),
-                    ),
-                    dim=-1,
-                )
-                base_camera_rays = torch.linalg.solve(
-                    rearrange(
-                        context["intrinsics"],
-                        "b v i j -> b v () () i j",
-                    ),
-                    base_homogeneous_xy.unsqueeze(-1),
-                ).squeeze(-1)
-                base_gaussian_depths = (
-                    depths.detach()
-                    * base_camera_rays.norm(dim=-1, keepdim=True)
-                )
-                base_gaussians = self.gaussian_adapter.forward(
-                    rearrange(
-                        context["extrinsics"],
-                        "b v i j -> b v () () () i j",
-                    ),
-                    rearrange(
-                        context["intrinsics"],
-                        "b v i j -> b v () () () i j",
-                    ),
-                    rearrange(
-                        base_xy_ray,
-                        "b v r srf xy -> b v r srf () xy",
-                    ),
-                    base_gaussian_depths,
-                    self.map_pdf_to_opacity(densities.detach(), global_step) / gpp,
-                    rearrange(
-                        base_raw[..., 2:],
-                        "b v r srf c -> b v r srf () c",
-                    ),
-                    (h, w),
-                )
 
         # Dump visualizations if needed.
         if visualization_dump is not None:
@@ -373,7 +273,7 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
         # Optionally apply a per-pixel opacity.
         opacity_multiplier = 1
 
-        output_gaussians = Gaussians(
+        return Gaussians(
             rearrange(
                 gaussians.means,
                 "b v r srf spp xyz -> b (v r srf spp) xyz",
@@ -390,31 +290,8 @@ class EncoderCostVolume(Encoder[EncoderCostVolumeCfg]):
                 opacity_multiplier * gaussians.opacities,
                 "b v r srf spp -> b (v r srf spp)",
             ),
+            raw_context_inverse_depth=extra_info["raw_context_inverse_depth"],
         )
-        if base_gaussians is not None:
-            output_gaussians.lidar_base_gaussians = Gaussians(
-                rearrange(
-                    base_gaussians.means,
-                    "b v r srf spp xyz -> b (v r srf spp) xyz",
-                ),
-                rearrange(
-                    base_gaussians.covariances,
-                    "b v r srf spp i j -> b (v r srf spp) i j",
-                ),
-                rearrange(
-                    base_gaussians.harmonics,
-                    "b v r srf spp c d_sh -> b (v r srf spp) c d_sh",
-                ),
-                rearrange(
-                    opacity_multiplier * base_gaussians.opacities,
-                    "b v r srf spp -> b (v r srf spp)",
-                ),
-            )
-        output_gaussians.visual_disparity = rearrange(
-            self.depth_predictor.visual_disparity,
-            "(v b) d h w -> b v d h w", b=b, v=v,
-        )
-        return output_gaussians
 
     def get_data_shim(self) -> DataShim:
         def data_shim(batch: BatchedExample) -> BatchedExample:

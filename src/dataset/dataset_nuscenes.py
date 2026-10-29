@@ -4,7 +4,6 @@ from typing import Literal
 
 import torch
 import torchvision.transforms as tf
-from torchvision.utils import save_image
 from PIL import Image
 from torch import Tensor
 from torch.utils.data import IterableDataset
@@ -19,7 +18,6 @@ from .shims.crop_shim import apply_crop_shim
 from .types import Stage
 from .view_sampler import ViewSampler
 import numpy as np
-from nuscenes.utils.data_classes import LidarPointCloud
 
 
 DYNAMIC_ATTRIBUTES = {
@@ -40,16 +38,17 @@ class DatasetNuScenesCfg(DatasetCfgCommon):
     skip_bad_shape: bool = True
     max_fov: float = 120.0
     use_keyframe_only: bool = True
+    load_lidar_depth: bool = False
 
     camera_name: str = "CAM_FRONT"
+    # Each selected camera contributes independent two-context temporal windows.
+    camera_names: list[str] | None = None
     num_context_views: int = 2
     num_target_views: int = 1
     frame_stride: int = 1
     dynamic_mask_expansion_ratio: float = 0.15
     dynamic_mask_min_padding_px: int = 8
     dynamic_mask_min_depth: float = 0.01
-    save_dynamic_diagnostics: bool = False
-    dynamic_diagnostics_dir: Path = Path("outputs/dynamic_diagnostics")
 
 
 class DatasetNuScenes(IterableDataset):
@@ -80,142 +79,12 @@ class DatasetNuScenes(IterableDataset):
             for attribute in self.nusc.attribute
             if attribute["name"] in DYNAMIC_ATTRIBUTES
         }
-        self._dynamic_diagnostic_saved = False
 
         self.items = self._build_index()
 
     @staticmethod
     def _invert_transform(T: Tensor) -> Tensor:
         return torch.linalg.inv(T)
-
-    def _project_lidar_to_camera(
-        self,
-        lidar_sd_token: str,
-        camera_sd_token: str,
-        K_norm: Tensor,
-        image_shape: tuple[int, int],
-    ) -> tuple[Tensor, Tensor]:
-        """
-    Project LIDAR_TOP points to the given camera image plane.
-
-    Args:
-        lidar_sd_token:  sample_data token for LIDAR_TOP
-        camera_sd_token: sample_data token for camera
-        K_norm:          normalized intrinsics [3,3]
-        image_shape:     (H, W) after crop
-
-    Returns:
-        lidar_depth: [1, H, W]
-        lidar_mask:  [1, H, W]
-        """
-        H, W = image_shape
-
-        lidar_sd = self.nusc.get("sample_data", lidar_sd_token)
-        cam_sd = self.nusc.get("sample_data", camera_sd_token)
-
-        lidar_cs = self.nusc.get("calibrated_sensor", lidar_sd["calibrated_sensor_token"])
-        lidar_ep = self.nusc.get("ego_pose", lidar_sd["ego_pose_token"])
-
-        cam_cs = self.nusc.get("calibrated_sensor", cam_sd["calibrated_sensor_token"])
-        cam_ep = self.nusc.get("ego_pose", cam_sd["ego_pose_token"])
-
-        # 读 LiDAR 点云
-        lidar_path = self.cfg.root / lidar_sd["filename"]
-        pc = LidarPointCloud.from_file(str(lidar_path))
-
-        # points: [4, N] or [5, N], we only need xyz
-        pts = torch.from_numpy(pc.points[:3].T).float()  # [N, 3]
-        if pts.numel() == 0:
-            depth = torch.zeros((1, H, W), dtype=torch.float32)
-            mask = torch.zeros((1, H, W), dtype=torch.float32)
-            return depth, mask
-
-        # lidar -> ego(lidar time)
-        T_lidar_to_ego = self._make_transform(
-            lidar_cs["translation"],
-            lidar_cs["rotation"],
-        )
-        # ego(lidar time) -> world
-        T_ego_to_world_lidar = self._make_transform(
-            lidar_ep["translation"],
-            lidar_ep["rotation"],
-        )
-
-        # camera -> ego(camera time)
-        T_cam_to_ego = self._make_transform(
-            cam_cs["translation"],
-            cam_cs["rotation"],
-        )
-        # ego(camera time) -> world
-        T_ego_to_world_cam = self._make_transform(
-            cam_ep["translation"],
-            cam_ep["rotation"],
-        )
-
-        # lidar -> world
-        T_lidar_to_world = T_ego_to_world_lidar @ T_lidar_to_ego
-        # world -> camera
-        T_world_to_cam = self._invert_transform(T_ego_to_world_cam @ T_cam_to_ego)
-
-        # transform points: lidar -> world -> camera
-        pts_h = torch.cat([pts, torch.ones((pts.shape[0], 1))], dim=1)   # [N,4]
-        pts_cam = (T_world_to_cam @ T_lidar_to_world @ pts_h.T).T[:, :3] # [N,3]
-
-        x = pts_cam[:, 0]
-        y = pts_cam[:, 1]
-        z = pts_cam[:, 2]
-
-        # 只保留在相机前方的点
-        valid = (z > self.cfg.near) & (z < self.cfg.far)
-        x = x[valid]
-        y = y[valid]
-        z = z[valid]
-
-        if z.numel() == 0:
-            depth = torch.zeros((1, H, W), dtype=torch.float32)
-            mask = torch.zeros((1, H, W), dtype=torch.float32)
-            return depth, mask
-
-        # normalized K -> pixel K
-        fx = K_norm[0, 0] * W
-        fy = K_norm[1, 1] * H
-        cx = K_norm[0, 2] * W
-        cy = K_norm[1, 2] * H
-
-        u = fx * (x / z) + cx
-        v = fy * (y / z) + cy
-
-        in_image = (
-            (u >= 0)
-            & (u < W)
-            & (v >= 0)
-            & (v < H)
-        )
-        u = u[in_image]
-        v = v[in_image]
-        z = z[in_image]
-
-        u = u.long()
-        v = v.long()
-
-        if z.numel() == 0:
-            depth = torch.zeros((1, H, W), dtype=torch.float32)
-            mask = torch.zeros((1, H, W), dtype=torch.float32)
-            return depth, mask
-
-        # 同一像素可能投到多个点，保留最近深度
-        linear_idx = v * W + u
-        depth_flat = torch.full((H * W,), float("inf"), dtype=torch.float32)
-
-        # 需要 PyTorch 支持 scatter_reduce_
-        depth_flat.scatter_reduce_(0, linear_idx, z, reduce="amin", include_self=True)
-
-        mask_flat = torch.isfinite(depth_flat)
-        depth_flat[~mask_flat] = 0.0
-
-        depth = depth_flat.view(1, H, W)
-        mask = mask_flat.float().view(1, H, W)
-        return depth, mask
 
     def _project_dynamic_mask_to_camera(
         self,
@@ -302,71 +171,8 @@ class DatasetNuScenes(IterableDataset):
 
         return dynamic_mask
 
-    def _save_dynamic_diagnostics(
-        self,
-        image: Tensor,
-        dynamic_mask: Tensor,
-        raw_lidar_mask: Tensor,
-        filtered_lidar_mask: Tensor,
-        sample_token: str,
-        camera_sd_token: str,
-    ) -> None:
-        """Save three aligned overlays and print filtering statistics."""
-        output_dir = Path(self.cfg.dynamic_diagnostics_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        stem = f"{sample_token}_{camera_sd_token}"
-
-        def overlay(
-            mask: Tensor,
-            color: tuple[float, float, float],
-            alpha: float,
-        ) -> Tensor:
-            mask = mask.to(dtype=image.dtype).clamp(0, 1)
-            color_tensor = image.new_tensor(color).view(3, 1, 1)
-            return image * (1.0 - alpha * mask) + color_tensor * alpha * mask
-
-        save_image(
-            overlay(dynamic_mask, (1.0, 0.0, 0.0), 0.45),
-            output_dir / f"{stem}_dynamic_mask.png",
-        )
-        save_image(
-            overlay(raw_lidar_mask, (1.0, 0.2, 0.0), 0.9),
-            output_dir / f"{stem}_lidar_before.png",
-        )
-        save_image(
-            overlay(filtered_lidar_mask, (0.0, 1.0, 0.2), 0.9),
-            output_dir / f"{stem}_lidar_after.png",
-        )
-
-        dynamic_ratio = dynamic_mask.float().mean().item()
-        lidar_points_before = raw_lidar_mask.sum().item()
-        lidar_points_after = filtered_lidar_mask.sum().item()
-        print(
-            "[Dynamic diagnostics] "
-            f"dynamic_ratio={dynamic_ratio:.6f}, "
-            f"lidar_points_before={lidar_points_before:.0f}, "
-            f"lidar_points_after={lidar_points_after:.0f}, "
-            f"output_dir={output_dir}"
-        )
-
     def _build_index(self) -> list[dict]:
-        """
-        Build temporal windows on a single camera stream, e.g. CAM_FRONT.
-
-        【修改后】
-        Each item explicitly stores:
-            context_sample_tokens = [t-s, t+s]
-            target_sample_tokens  = [t]
-
-        For example:
-            num_context_views = 2
-            num_target_views  = 1
-            frame_stride      = 1
-
-        Then:
-            context = [t-1, t+1]
-            target  = [t]
-        """
+        """Build temporal windows per camera, keeping calibration streams separate."""
         split_scenes = create_splits_scenes()
 
         if self.cfg.version == "v1.0-mini":
@@ -387,7 +193,17 @@ class DatasetNuScenes(IterableDataset):
                 raise ValueError(f"Unknown stage: {self.stage}")
 
         items = []
-        camera_name = self.cfg.camera_name
+        camera_names = getattr(self.cfg, "camera_names", None)
+        if camera_names is None:
+            camera_names = [self.cfg.camera_name]
+        supported = {
+            "CAM_FRONT", "CAM_FRONT_LEFT", "CAM_FRONT_RIGHT",
+            "CAM_BACK", "CAM_BACK_LEFT", "CAM_BACK_RIGHT",
+        }
+        if not camera_names or len(set(camera_names)) != len(camera_names):
+            raise ValueError("camera_names must be nonempty and contain no duplicates.")
+        if set(camera_names) - supported:
+            raise ValueError(f"Unsupported nuScenes cameras: {set(camera_names) - supported}")
 
         num_context = self.cfg.num_context_views
         num_target = self.cfg.num_target_views
@@ -412,48 +228,71 @@ class DatasetNuScenes(IterableDataset):
             if scene_name not in allowed_scene_names:
                 continue
 
-            # Traverse sample chain of this scene.
-            sample_tokens = []
-            token = scene["first_sample_token"]
-            while token != "":
-                sample = self.nusc.get("sample", token)
+            for camera_name in camera_names:
+                # Traverse sample chain of this scene.
+                sample_tokens = []
+                token = scene["first_sample_token"]
+                while token != "":
+                    sample = self.nusc.get("sample", token)
 
-                if camera_name not in sample["data"]:
+                    if camera_name not in sample["data"]:
+                        token = sample["next"]
+                        continue
+
+                    sd_token = sample["data"][camera_name]
+                    sd = self.nusc.get("sample_data", sd_token)
+
+                    # optional: keyframe only
+                    if self.cfg.use_keyframe_only and not sd["is_key_frame"]:
+                        token = sample["next"]
+                        continue
+
+                    sample_tokens.append(token)
                     token = sample["next"]
-                    continue
 
-                sd_token = sample["data"][camera_name]
-                sd = self.nusc.get("sample_data", sd_token)
+                # num_context=2, stride=1: context=[t-1, t+1], target=[t].
+                # num_context=2, stride=2: context=[t-2, t+2], target=[t].
+                # Target-centered interpolation: [t-stride, t+stride] -> t.
+                for center in range(stride, len(sample_tokens) - stride):
+                    context_sample_tokens = [
+                        sample_tokens[center - stride],
+                        sample_tokens[center + stride],
+                    ]
 
-                # optional: keyframe only
-                if self.cfg.use_keyframe_only and not sd["is_key_frame"]:
-                    token = sample["next"]
-                    continue
+                    target_sample_tokens = [sample_tokens[center]]
 
-                sample_tokens.append(token)
-                token = sample["next"]
-
-            # num_context=2, stride=1: context=[t-1, t+1], target=[t].
-            # num_context=2, stride=2: context=[t-2, t+2], target=[t].
-            # Target-centered interpolation: [t-stride, t+stride] -> t.
-            for center in range(stride, len(sample_tokens) - stride):
-                context_sample_tokens = [
-                    sample_tokens[center - stride],
-                    sample_tokens[center + stride],
-                ]
-
-                target_sample_tokens = [sample_tokens[center]]
-
-                items.append(
-                    {
-                        "scene_name": scene_name,
-                        "context_sample_tokens": context_sample_tokens,
-                        "target_sample_tokens": target_sample_tokens,
-                        "target_time_index": center,
-                    }
-                )
+                    items.append(
+                        {
+                            "scene_name": scene_name,
+                            "camera_name": camera_name,
+                            "context_sample_tokens": context_sample_tokens,
+                            "target_sample_tokens": target_sample_tokens,
+                            "target_time_index": center,
+                        }
+                    )
 
         return items
+
+    def _load_lidar_depth(self, sample_token, camera_token, intrinsics, shape):
+        """Project single-sweep LiDAR into the cropped image; zero means missing."""
+        sample = self.nusc.get("sample", sample_token)
+        points, z, _ = self.nusc.explorer.map_pointcloud_to_image(
+            sample["data"]["LIDAR_TOP"], camera_token
+        )
+        camera = self.nusc.get("sample_data", camera_token)
+        calibration = self.nusc.get("calibrated_sensor", camera["calibrated_sensor_token"])
+        original_k = np.asarray(calibration["camera_intrinsic"])
+        rays = np.linalg.solve(original_k, np.vstack((points[:2], np.ones(len(z)))))
+        xy = intrinsics.numpy() @ rays
+        h, w = shape
+        x = np.floor(xy[0] * w).astype(np.int64)
+        y = np.floor(xy[1] * h).astype(np.int64)
+        valid = np.isfinite(z) & (z > 0) & (x >= 0) & (x < w) & (y >= 0) & (y < h)
+        depth = np.full(h * w, np.inf, dtype=np.float32)
+        # Retain the nearest surface when several points land in one pixel.
+        np.minimum.at(depth, y[valid] * w + x[valid], z[valid])
+        depth[~np.isfinite(depth)] = 0
+        return torch.from_numpy(depth.reshape(h, w))
 
     def __iter__(self):
         indices = list(range(len(self.items)))
@@ -465,6 +304,7 @@ class DatasetNuScenes(IterableDataset):
         for idx in indices:
             item = self.items[idx]
             scene_name = item["scene_name"]
+            camera_name = item["camera_name"]
 
             # 【修改】现在 _build_index() 已经显式区分 context / target
             context_sample_tokens = item["context_sample_tokens"]
@@ -480,12 +320,11 @@ class DatasetNuScenes(IterableDataset):
             extrinsics_list = []
 
             camera_sd_tokens = []
-            lidar_sd_tokens = []
 
-            for view_idx, sample_token in enumerate(sample_tokens):
+            for sample_token in sample_tokens:
                 sample = self.nusc.get("sample", sample_token)
 
-                cam_sd_token = sample["data"][self.cfg.camera_name]
+                cam_sd_token = sample["data"][camera_name]
 
                 img_tensor, c2w, K = self._load_camera(cam_sd_token)
 
@@ -494,8 +333,6 @@ class DatasetNuScenes(IterableDataset):
                 extrinsics_list.append(c2w)
 
                 camera_sd_tokens.append(cam_sd_token)
-                if view_idx < len(context_sample_tokens):
-                    lidar_sd_tokens.append(sample["data"]["LIDAR_TOP"])
 
             images = torch.stack(image_tensors, dim=0)         # [v, 3, h, w]
             intrinsics = torch.stack(intrinsics_list, dim=0)   # [v, 3, 3]
@@ -531,7 +368,11 @@ class DatasetNuScenes(IterableDataset):
                     "image": context_images,
                     "near": self.get_bound("near", len(context_indices)),
                     "far": self.get_bound("far", len(context_indices)),
-                    "index": context_indices,
+                    # Loading slots [0, 1] are not scene time indices.
+                    "index": torch.tensor([
+                        item["target_time_index"] - self.cfg.frame_stride,
+                        item["target_time_index"] + self.cfg.frame_stride,
+                    ], dtype=torch.long),
                 },
                 "target": {
                     "extrinsics": extrinsics[target_indices],
@@ -539,12 +380,24 @@ class DatasetNuScenes(IterableDataset):
                     "image": target_images,
                     "near": self.get_bound("near", len(target_indices)),
                     "far": self.get_bound("far", len(target_indices)),
-                    "index": target_indices,
+                    "index": torch.tensor([item["target_time_index"]], dtype=torch.long),
                 },
-                "scene": f"{scene_name}_{sample_tokens[0]}",
+                "scene": (
+                    f"{scene_name}_{camera_name}_{sample_tokens[0]}"
+                    if self.cfg.camera_names is not None
+                    else f"{scene_name}_{sample_tokens[0]}"
+                ),
             }
 
             example = apply_crop_shim(example, tuple(self.cfg.image_shape))
+            if self.cfg.load_lidar_depth:
+                example["context"]["lidar_depth"] = torch.stack([
+                    self._load_lidar_depth(
+                        token, camera_sd_tokens[i],
+                        example["context"]["intrinsics"][i],
+                        tuple(example["context"]["image"].shape[-2:]),
+                    ) for i, token in enumerate(context_sample_tokens)
+                ])
 
             # Build masks at the final image resolution. RGB remains untouched so
             # visual features and the cost volume are still computed globally.
@@ -604,65 +457,7 @@ class DatasetNuScenes(IterableDataset):
             example["target"]["dynamic_mask"] = torch.stack(
                 target_dynamic_masks, dim=0
             )
-            # ===== 在 crop 之后生成 LiDAR depth / mask =====
-            context_lidar_depths = []
-            context_lidar_masks = []
-            context_raw_lidar_masks = []
-
-            for i, ctx_idx in enumerate(context_indices.tolist()):
-                H, W = example["context"]["image"][i].shape[-2:]
-                K_norm = example["context"]["intrinsics"][i]
-
-                lidar_depth, lidar_mask = self._project_lidar_to_camera(
-                    lidar_sd_token=lidar_sd_tokens[ctx_idx],
-                    camera_sd_token=camera_sd_tokens[ctx_idx],
-                    K_norm=K_norm,
-                    image_shape=(H, W),
-                )
-
-                # Dynamic LiDAR points must be removed before any model branch
-                # can consume lidar_depth/lidar_mask.
-                static_mask = 1.0 - example["context"]["dynamic_mask"][i]
-                context_raw_lidar_masks.append(lidar_mask.clone())
-                lidar_mask = lidar_mask * static_mask
-                lidar_depth = lidar_depth * lidar_mask
-
-                context_lidar_depths.append(lidar_depth)
-                context_lidar_masks.append(lidar_mask)
-
-            example["context"]["lidar_depth"] = torch.stack(
-                context_lidar_depths, dim=0
-            )  # [v,1,H,W]
-            example["context"]["lidar_mask"] = torch.stack(
-                context_lidar_masks, dim=0
-            )  # [v,1,H,W]
-
-            if (
-                self.cfg.save_dynamic_diagnostics
-                and not self._dynamic_diagnostic_saved
-                and example["context"]["dynamic_mask"].sum() > 0
-            ):
-                diagnostic_view = int(
-                    example["context"]["dynamic_mask"]
-                    .flatten(1)
-                    .sum(dim=1)
-                    .argmax()
-                    .item()
-                )
-                self._save_dynamic_diagnostics(
-                    image=example["context"]["image"][diagnostic_view],
-                    dynamic_mask=example["context"]["dynamic_mask"][diagnostic_view],
-                    raw_lidar_mask=context_raw_lidar_masks[diagnostic_view],
-                    filtered_lidar_mask=example["context"]["lidar_mask"][
-                        diagnostic_view
-                    ],
-                    sample_token=context_sample_tokens[diagnostic_view],
-                    camera_sd_token=camera_sd_tokens[diagnostic_view],
-                )
-                self._dynamic_diagnostic_saved = True
-
-            # Augment all aligned image-space tensors together. In particular,
-            # projected dynamic masks and filtered LiDAR must follow an RGB flip.
+            # Keep projected dynamic masks aligned with augmented RGB images.
             if self.stage == "train" and self.cfg.augment:
                 example = apply_augmentation_shim(example)
 

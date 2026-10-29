@@ -10,3 +10,4 @@ class Gaussians:
     covariances: Float[Tensor, "batch gaussian dim dim"]
     harmonics: Float[Tensor, "batch gaussian 3 d_sh"]
     opacities: Float[Tensor, "batch gaussian"]
+    raw_context_inverse_depth: Float[Tensor, "batch view height width sample"] | None = None

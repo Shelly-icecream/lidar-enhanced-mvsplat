@@ -10,7 +10,7 @@ from einops import einsum, rearrange, repeat
 from jaxtyping import Float
 from torch import Tensor
 
-from ...geometry.projection import get_fov, homogenize_points
+from ...geometry.projection import homogenize_points
 from ..encoder.costvolume.conversions import depth_to_relative_disparity
 
 
@@ -19,6 +19,7 @@ def get_projection_matrix(
     far: Float[Tensor, " batch"],
     fov_x: Float[Tensor, " batch"],
     fov_y: Float[Tensor, " batch"],
+    intrinsics: Float[Tensor, "batch 3 3"] | None = None,
 ) -> Float[Tensor, "batch 4 4"]:
     """Maps points in the viewing frustum to (-1, 1) on the X/Y axes and (0, 1) on the Z
     axis. Differs from the OpenGL version in that Z doesn't have range (-1, 1) after
@@ -38,6 +39,11 @@ def get_projection_matrix(
     result[:, 1, 1] = 2 * near / (top - bottom)
     result[:, 0, 2] = (right + left) / (right - left)
     result[:, 1, 2] = (top + bottom) / (top - bottom)
+    if intrinsics is not None:
+        # Normalized image coordinates map to NDC as 2 * xy - 1.
+        # Preserve the calibrated focal lengths and off-center principal point.
+        result[:, :2, :2] = 2 * intrinsics[:, :2, :2]
+        result[:, :2, 2] = 2 * intrinsics[:, :2, 2] - 1
     result[:, 3, 2] = 1
     result[:, 2, 2] = far / (far - near)
     result[:, 2, 3] = -(far * near) / (far - near)
@@ -77,11 +83,14 @@ def render_cuda(
     b, _, _ = extrinsics.shape
     h, w = image_shape
 
-    fov_x, fov_y = get_fov(intrinsics).unbind(dim=-1)
-    tan_fov_x = (0.5 * fov_x).tan()
-    tan_fov_y = (0.5 * fov_y).tan()
+    # The rasterizer uses these values to recover focal lengths for covariance
+    # projection. Edge-to-edge FOV is insufficient for off-center intrinsics.
+    tan_fov_x = 0.5 / intrinsics[:, 0, 0]
+    tan_fov_y = 0.5 / intrinsics[:, 1, 1]
+    fov_x = 2 * tan_fov_x.atan()
+    fov_y = 2 * tan_fov_y.atan()
 
-    projection_matrix = get_projection_matrix(near, far, fov_x, fov_y)
+    projection_matrix = get_projection_matrix(near, far, fov_x, fov_y, intrinsics)
     projection_matrix = rearrange(projection_matrix, "b i j -> b j i")
     view_matrix = rearrange(extrinsics.inverse(), "b i j -> b j i")
     full_projection = view_matrix @ projection_matrix

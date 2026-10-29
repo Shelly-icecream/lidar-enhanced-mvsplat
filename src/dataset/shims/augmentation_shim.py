@@ -14,15 +14,12 @@ def reflect_extrinsics(
 
 
 def reflect_views(views: AnyViews) -> AnyViews:
-    reflected = {
+    return {
         **views,
         "image": views["image"].flip(-1),
         "extrinsics": reflect_extrinsics(views["extrinsics"]),
+        **{key: views[key].flip(-1) for key in ("lidar_depth", "dynamic_mask") if key in views},
     }
-    for key in ("dynamic_mask", "lidar_depth", "lidar_mask"):
-        if key in views:
-            reflected[key] = views[key].flip(-1)
-    return reflected
 
 
 def apply_augmentation_shim(
