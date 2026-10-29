@@ -349,14 +349,22 @@ loss:
 
 PSNR/SSIM 越高越好，LPIPS 越低越好。
 
-| 实验 | 增加loss | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | 推理展示（scene-0103） |
-| --- | :---: | --- | ---: | ---: | ---: | :---: |
-| baseline | — | 无（直接推理） | 17.3907 | 0.4055 | 0.3885 | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
-| Stage 0 | — | 无（直接推理） | 17.4256 | 0.4068 | 0.3872 | <img src="outputs/test/baseline/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
-| Stage 1 | cross_visual_depth | `depth_predictor.to_disparity` | 20.4386 | 0.5668 | 0.3083 | <img src="outputs/test/stage1/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
-| Stage 2 | context_rgb | `depth_predictor.lidar_gaussians` | 20.8392 | 0.5738 | 0.2939 | <img src="outputs/test/stage2/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
-| Stage 3 | cross_visual_depth, lidar_inverse_depth, context_rgb | `depth_predictor.depth_head_lowres`、`depth_predictor.refine_unet`、`depth_predictor.to_disparity`、`depth_predictor.to_gaussians` | 21.4204 | 0.6007 | 0.2771 | <img src="outputs/test/stage3/scene-0103_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
-| Stage 4 | cross_visual_depth, lidar_inverse_depth, context_rgb | `all` | **21.7153** | **0.6168** | **0.2585** | <img src="outputs/test/stage4/scene-0103_CAM_FRONT_87e772078a494d42bd34cd16172808bc/color/000002.png" width="240"> |
+# CAM_6
+
+| 实验 | 增加loss | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | steps |
+| --- | :---: | --- | ---: | ---: | ---: | ---: |
+| baseline_depth_error | — | 无（直接推理） | 20.0636 | 0.5540 | 0.3676 | 0 |
+| baseline | — | 无（直接推理） | 20.1596 | 0.5534 | 0.3652 | 0 |
+| full_shared | lidar_inverse_depth, context_rgb | `all` | 20.4492 | 0.5537 | 0.3213 | 40000 |
+| pruned | lidar_inverse_depth, context_rgb | `all-3 module` | 20.1844 | 0.5440 | 0.3340 | 40000 |
+| pruned_split | lidar_inverse_depth, context_rgb | `all-3module+to_disparity+to_gaussians` | 20.3112 | 0.5555 | 0.3351 | 40000 |
+| pruned_split_alternating | lidar_inverse_depth, context_rgb | `all-3module+to_disparity+to_gaussians` | 20.2357 | 0.5463 | 0.3362 | 40000 |
+
+
+
+
+
+| pruned_split_alternating | lidar_inverse_depth, context_rgb | `all-3module+to_disparity+to_gaussians` | 20.2359 | 0.5473 | 0.3348 | 60000 |
 
 
 | 实验 | 增加loss | 本阶段训练模块 | PSNR ↑ | SSIM ↑ | LPIPS ↓ |
