@@ -360,7 +360,7 @@ PSNR/SSIM 越高越好，LPIPS 越低越好。
 | --- | :---: | --- | ---: | ---: | ---: | ---: |
 | baseline_depth_error | — | 无（直接推理） | 20.0636 | 0.5540 | 0.3676 | 0 |
 | baseline | — | 无（直接推理） | 20.1596 | 0.5534 | 0.3652 | 0 |
-| full_shared | lidar_inverse_depth, context_rgb | `all` | 
+| full_shared | lidar_inverse_depth, context_rgb | `all` | 20.4492 | 0.5537 | 0.3213 | 40000 |
 | pruned | lidar_inverse_depth, context_rgb | `all-3 module` | 20.1844 | 0.5440 | 0.3340 | 40000 |
 | pruned_split | lidar_inverse_depth, context_rgb | `all-3module+to_disparity+to_gaussians` | 20.3112 | 0.5555 | 0.3351 | 40000 |
 | pruned_split_alternating | lidar_inverse_depth, context_rgb | `all-3module+to_disparity+to_gaussians` | 20.2357 | 0.5463 | 0.3362 | 40000 |
