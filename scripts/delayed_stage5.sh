@@ -26,6 +26,8 @@ check_branch() {
 }
 
 check_branch
+echo 'Checking training config before waiting.'
+python -m src.main +experiment=stage5 mode=train --cfg job --resolve > "${LOG_FILE%.log}.config.yaml"
 echo "Log: $PROJECT_DIR/$LOG_FILE"
 echo "Scheduled start (Beijing): $(TZ=Asia/Shanghai date -d "+$DELAY_SECONDS seconds" '+%F %T %Z')"
 echo "Waiting $DELAY_SECONDS seconds."
