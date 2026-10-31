@@ -1,29 +1,30 @@
 # full_shared 接力棒：数据扩展与消融实验
+## 1. 分支说明
+main分支是完整实验方案，baseline_depth_error分支是仅把mvsplat应用场景迁移后的代码，可以用于做消融实验，full_shared分支内容和main是一样的，其余分支是尝试过的方案暂时不管。
+等你搭好环境和跑通评测时，我会把你加为这个项目的contributor，修改可以push到full_shared分支上，main分支用来保存可行版本，如果遇到错误可以回退。
+看到markdown中没有说清楚的地方可以直接在群里问，不要猜想。
 
-交接日期：2026-10-29。本文记录后续实验计划；main 已合入 full_shared，本文不代表数据划分修复或实验已完成。
-
-## 1. 目标与代码版本
-main分支是完整实验方案，baseline_depth_error分支是仅把mvsplat应用场景迁移后的代码，可以用于做消融实验，其余分支是尝试过的方案暂时不管
-
-1.首先对比main和baseline_depth_error除了新增加的loss、lidar bias是否还有别的不同，这些不同一定要向main对齐
-2.扩大数据并建立同预算纯视觉微调对照，再解释 LiDAR 监督、硬替换和 context 重建的贡献。
-3.关注psnr、lpips、ssim指标，跟lidar深度的loss、深度是否截断
+## 2. 消融实验步骤
+1.检查代码逻辑是否有明显错误，可以边做实验边做检查
+2.对比full_shared和baseline_depth_error除了新增加的loss、lidar bias是否还有别的不同，这些不同一定要向full_shared对齐
+3.扩大数据集，现在还是mini数据集，你需要在nuscenes官方网站上找到完整数据集下载和使用，应该是要注册一个账号，数据集用于学习是可以的。
+4.建立同预算纯视觉微调对照，再解释LiDAR监督、硬替换和context重建的贡献。
+5.指标：psnr、lpips、ssim、推理时间、训练时间、lidar_loss
+要留意深度是否截断
 
 
 ## 3. 已有结果：参考，不是完整数据结论
-
 当前配置为 mini、176×320。
-
 # CAM_6
 | 实验 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | steps |
 | --- | ---: | ---: | ---: | ---: |
 | baseline_depth_error，直接推理 | 20.0636 | 0.5540 | 0.3676 | 0 |
 | baseline，直接推理 | 20.1596 | 0.5534 | 0.3652 | 0 |
 | full_shared | 20.4492 | 0.5537 | 0.3213 | 40000(训练60000步，取的40000步) |
-
 CAM_6 表示六路相机样本共同训练：每个样本仍是同一相机 `[t-1,t+1] → t`，不是六相机联合融合。
 
-## 4. 数据从 mini 扩大到 trainval
+## 4. 完整消融流程
+数据从 mini 扩大到 trainval
 
 准备完整 `v1.0-trainval` 元数据及对应 samples 等数据，沿用 nuScenes 根目录结构与 SDK。训练覆盖：
 
