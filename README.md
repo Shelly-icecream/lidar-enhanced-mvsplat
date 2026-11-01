@@ -267,7 +267,7 @@ tests/                                 # 几何、硬替换、逆深度监督检
 HANDOFF_ABLATIONS.md                    # 下一阶段交接计划
 ```
 
-运行环境与预训练资源请参照 MVSplat 官方说明。
+环境配置请直接查阅 [MVSplat 官方 GitHub 的 Installation 说明](https://github.com/donydchen/mvsplat#installation)。本项目不提供环境搭建步骤，安装过程以原仓库说明为准；预训练资源也请参照官方仓库。
 
 ## 10. 致谢与引用
 

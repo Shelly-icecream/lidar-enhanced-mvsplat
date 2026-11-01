@@ -1,36 +1,73 @@
-# full_shared 接力棒：数据扩展与消融实验
-## 1. 分支说明
-main分支是完整实验方案，baseline_depth_error分支是仅把mvsplat应用场景迁移后的代码，可以用于做消融实验，full_shared分支内容和main是一样的，其余分支是尝试过的方案暂时不管。
+# full_shared 实验交接文档
 
-等你搭好环境和跑通评测时，我会把你加为这个项目的contributor，修改可以push到full_shared分支上，main分支用来保存可行版本，如果遇到错误可以回退。
+> **范围**：nuScenes 数据扩展、组件消融与统一评测。以当前 `main/full_shared` 实现为准。
 
-看到markdown中没有说清楚的地方可以直接在群里问，不要猜想。
+## 1. 分支与当前实现
+
+> **环境配置**：请直接查阅 [MVSplat 官方 GitHub 的 Installation 说明](https://github.com/donydchen/mvsplat#installation)。本项目不提供环境搭建步骤，安装过程以原仓库说明为准。
+
+### 1.1 分支用途
+
+本文以本地 main 当前代码为准。本次文档修改前，main 与 `full_shared` 的文件内容一致。
+
+`baseline_depth_error` 是 RE10K 迁移到 nuScenes 的历史纯视觉基线分支；`baseline.yaml` 当前启用 target MSE + 0.05 LPIPS（第0步开始）。其余探索分支暂不纳入实验。
+
+`baseline_depth_error` 与 main 不只相差新增 loss 和 LiDAR：main 在 Gaussian 构建前将相机 Z-depth 按偏移像素射线范数转换为射线距离，而`baseline_depth_error`分支直接传入深度。
+
+> **正式消融统一入口**：
+
+等你搭好环境和跑通评测时，我会把你加为这个项目的 contributor，修改可以 push 到 `full_shared` 分支上，`main` 分支用来保存可行版本，如果遇到错误可以回退。
+
+看到 Markdown 中没有说清楚的地方可以直接在群里问，不要猜想。
+
+### 1.2 动态区域与 LiDAR
+
+| 环节 | `main/full_shared` 当前实现 |
+| --- | --- |
+| 动态 mask 来源 | 仅 context 的 nuScenes annotation 属性：`vehicle.moving`、`pedestrian.moving`、`cycle.with_rider` |
+| mask 形状 | 3D 框投影后的2D矩形；每侧按对应宽/高的15%扩展，至少8像素 |
+| RGB 与高斯 | 输入 RGB 完整保留，特征和 cost volume 全图计算；动态高斯不删除，两个 context 的完整高斯合并渲染 |
+| target MSE / LPIPS | 全图计算，动态区域参与；LPIPS 权重0.05，从第0步启用 |
+| context RGB | 完整高斯渲染回各 context 后，按各自静态 mask 计算 MSE，并按有效静态元素数归一化；权重1.0 |
+| LiDAR 加载 | `load_lidar_depth=true` 时仅加载 context 对应单帧 `LIDAR_TOP`，投影为裁剪后分辨率的相机 Z-depth，同像素取最近点 |
+| 动态 LiDAR | 原始点云仍需读取并投影；落在各自 context 动态框内的点，在写入深度图前丢弃，缺失/动态像素记0；训练和测试均执行 |
+| D 深度监督 | 对 clamp 前、硬替换前的原始逆深度与有效 LiDAR 的1/Z做 Smooth L1；weight=1、beta=0.01；有效点须有限、正值且在 near/far 范围内 |
+| B 硬替换 | 在预测深度 clamp 后、Gaussian 构建前，用有效 LiDAR Z-depth 直接替换；零值不替换，动态框内保留网络预测 |
+| 测试指标 | 整图 PSNR/SSIM/LPIPS，不屏蔽动态区域 |
+
+硬替换位置沿最终深度路径不再给视觉深度预测回传梯度，D 仍监督替换前的原始预测。context loss 只屏蔽误差位置，动态高斯若影响框外像素仍可能获得重建梯度。
+
+测试仍使用 context 的动态标注进行 LiDAR 过滤，因此 test1 应注明“LiDAR + context 动态标注预处理”的输入条件。`load_lidar_depth=false` 时当前仍生成 context mask，但不读取点云。
 
 ## 2. 消融实验步骤
-1.检查代码逻辑是否有明显错误，可以边做实验边做检查
 
-2.对比full_shared和baseline_depth_error除了新增加的loss、lidar bias是否还有别的不同，这些不同一定要向full_shared对齐
+1. **检查代码**：确认逻辑是否有明显错误，可边做实验边检查。
 
-3.扩大数据集，现在还是mini数据集，你需要在nuscenes官方网站上找到完整数据集下载和使用，应该是要注册一个账号，数据集用于学习是可以的。
+2. **对齐实现**：记录 `full_shared` 与 `baseline_depth_error` 的历史差异。
 
-4.建立同预算纯视觉微调对照，再解释LiDAR监督、硬替换和context重建的贡献。
+3. **扩展数据**：将数据从 mini 扩大到 trainval，按数据提供方的访问流程和许可来。
 
-5.指标：psnr、lpips、ssim、推理时间、训练时间、lidar_loss
-要留意深度是否截断
+4. **建立对照**：建立同预算纯视觉微调基线(关闭full_shared的新增 loss 和训练推理时的 LiDAR 硬替换)，再解释 LiDAR 监督、硬替换和 context 重建的贡献。
 
+5. **记录指标**：报告 PSNR、LPIPS、SSIM、推理时间和训练时间；训练中启用 D 时记录 `loss/lidar_inverse_depth`。独立深度评测需另行实现，注意区分 clamp 前预测、clamp 后预测和硬替换后深度。
 
-## 3. 已有结果：参考，不是完整数据结论
-当前配置为 mini、176×320。
-# CAM_6
+## 3. 历史结果
+
+历史结果使用 mini、176×320。下表数值沿用既有记录，本次未重跑核验；旧 checkpoint 未采用当前动态 LiDAR 过滤方法。
+
+### CAM_6
+
 | 实验 | PSNR ↑ | SSIM ↑ | LPIPS ↓ | steps |
 | --- | ---: | ---: | ---: | ---: |
-| baseline_depth_error，直接推理 | 20.0636 | 0.5540 | 0.3676 | 0 |
+| `baseline_depth_error`，直接推理 | 20.0636 | 0.5540 | 0.3676 | 0 |
 | baseline，直接推理 | 20.1596 | 0.5534 | 0.3652 | 0 |
-| full_shared | 20.4492 | 0.5537 | 0.3213 | 40000(训练60000步，取的40000步) |
+| `full_shared` | 20.4492 | 0.5537 | 0.3213 | 40000（总训练 60000 步） |
+
 CAM_6 表示六路相机样本共同训练：每个样本仍是同一相机 `[t-1,t+1] → t`，不是六相机联合融合。
 
-## 4. 完整消融流程
-数据从 mini 扩大到 trainval
+## 4. 数据扩展与评测划分
+
+### 4.1 从 mini 扩展到 trainval
 
 准备完整 `v1.0-trainval` 元数据及对应 samples 等数据，沿用 nuScenes 根目录结构与 SDK。训练覆盖：
 
@@ -40,19 +77,23 @@ dataset:
   version: v1.0-trainval
 ```
 
-保持六路相机、176×320、near=1、far=80、frame_stride=1、keyframe 设置、动态 mask 和裁剪方式不变，先不要同时改分辨率。记录实际场景数、每路有效窗口数、跳过的样本数、LiDAR 有效点比例。
+保持六路相机、176×320、near=1、far=80、frame_stride=1、keyframe 设置、当前仅 context 的动态 mask 和裁剪方式不变，先不要同时改分辨率。记录实际场景数、每路有效窗口数、跳过的样本数、LiDAR 有效点比例。
 
-### 必须先修正评测划分
+### 4.2 正式实验前修正评测划分
 
-full_shared 的 `src/dataset/dataset_nuscenes.py::_build_index` 当前行为：mini 的 val/test 都选 mini_val；非 mini 的 train/val/test 分别选官方 train/val/test。**只把 version 改为 trainval 后执行 mode=test，会选择官方 test 场景，可能得到空数据；不能将空评测视为通过。** 官方 test 也不适合当前依赖动态 annotation 的本地评测流程。
+`full_shared` 的 `src/dataset/dataset_nuscenes.py::_build_index` 当前行为：mini 的 val/test 都选 mini_val；非 mini 的 train/val/test 分别选官方 train/val/test。
 
-下一位同学需要增加显式评测 split 配置，或明确让 trainval 的本地 test 使用有真值的 val 场景。使用官方 train 训练、官方 val 报告本地结果；若选择最佳 checkpoint，从 train 中另外按场景留出开发集，或预先固定步数，避免反复在最终报告集上调参。禁止随机按帧切分导致相邻时序窗口泄漏。
+> **评测前置条件**：只把 version 改为 trainval 后执行 mode=test，会选择官方 test 场景，可能得到空数据；不能将空评测视为通过。
+
+官方 test 也不适合当前依赖动态 annotation 的本地评测流程。
+
+目前设置 version=v1.0-trainval 后运行 mode=test，代码会找官方 test 场景。但 trainval 数据包含的是 train 和 val，因此应让本地 mode=test 使用官方 val 场景。使用官方 train 训练、官方 val 报告本地结果，**统一使用某一个步数，，不根据 val 分数挑选**。按完整 scene 划分，整段视频只属于一个集合即可。
 
 修复后先打印并核对场景列表、样本数和集合不相交，再用少量 batch 验证 train/离线 test。nuScenes 使用自己的时序采样逻辑，不要直接套用 RE10K 的 evaluation index JSON。
 
 ## 5. 第一轮必须完成：8组训练、16组评测
 
-正式性能对照固定 full_shared 架构、全参数训练、相同 RE10K 初始化，各组独立训练 **60000 optimizer steps**。确认某项功能是否生效不要求训练60000步，先按下列验证层级执行。三个训练因素做完整的二元组合：
+正式性能对照固定 `full_shared` 架构、全参数训练、相同 RE10K 初始化，各组独立训练 **60000 optimizer steps**。确认某项功能是否生效不要求训练60000步，先按下列验证层级执行。三个训练因素做完整的二元组合：
 
 - D：`lidar_inverse_depth` 有/无；有时 weight=1.0、beta=0.01。
 - C：`context_rgb` 有/无；有时 weight=1.0。
@@ -60,7 +101,7 @@ full_shared 的 `src/dataset/dataset_nuscenes.py::_build_index` 当前行为：m
 
 每个训练 checkpoint 分别以 `use_lidar_bias_test=false` 和 `true` 评测，共8次训练、16次评测/seed。测试开关不会改变已学权重，不需要为它再训练一遍。若开启在线验证，其结果会受 test 开关影响，因此本轮保持在线验证关闭、统一离线评测。
 
-### 功能验证与正式实验分开执行
+### 功能验证顺序
 
 - **配置检查，不训练**：用 `--cfg job` 确认 loss 列表、训练/测试硬替换开关、数据版本及输出路径。
 - **前向与数据检查，1～数个 batch**：确认 split 非空、数据形状正确；有效 LiDAR 像素在 bias 开启时被替换，关闭时保留视觉预测；无效点不替换。同一权重切换测试开关直接评测即可，不重训。
@@ -72,7 +113,7 @@ full_shared 的 `src/dataset/dataset_nuscenes.py::_build_index` 当前行为：m
 
 ### 5.1 训练矩阵
 
-基础 loss 统一保留 target MSE + 0.05 LPIPS（当前 full_shared 中的原始 RGB 目标）。执行前核对 baseline_depth_error 的历史配置；若“原 loss”与此不同，先记录差异并固定同一基础目标，不允许 baseline 与其他组偷偷使用不同 LPIPS 权重。不要把其他历史阶段的 cross_visual_depth 等目标混入。
+基础 loss 统一保留全图 target MSE + 0.05 LPIPS，LPIPS 从第0步生效。当前 `baseline_depth_error` 的 `baseline.yaml` 已与此基础目标对齐，但旧结果不因此自动变成同目标的实验。不要把其他历史阶段的 `cross_visual_depth` 等目标混入。
 
 | ID | D | C | B_train | B_test评测 | 定义 |
 | --- | --- | --- | --- | --- | --- |
@@ -83,7 +124,7 @@ full_shared 的 `src/dataset/dataset_nuscenes.py::_build_index` 当前行为：m
 | E001 | 无 | 无 | true | false / true | 仅增加训练硬替换 |
 | E101 | 有 | 无 | true | false / true | 深度监督 + 训练硬替换 |
 | E011 | 无 | 有 | true | false / true | context RGB + 训练硬替换 |
-| E111 | 有 | 有 | true | false / true | 完整训练方案；test=true 对应 full_shared |
+| E111 | 有 | 有 | true | false / true | 完整训练方案；test=true 对应 `full_shared` |
 
 ID 三位依次表示 D、C、B_train。报告结果时增加后缀 `_test0` / `_test1`。例如 E000_test1 是纯视觉训练后仅推理注入 LiDAR，不能命名为纯视觉测试。
 
@@ -101,6 +142,7 @@ python -m src.main +experiment=full_shared mode=train \
   dataset.version=v1.0-trainval dataset.load_lidar_depth=true \
   checkpointing.load=checkpoints/re10k.ckpt checkpointing.resume=false \
   trainer.max_steps=60000 seed=111123 train.run_validation=false \
+  model.encoder.frozen_params=[] checkpointing.every_n_train_steps=2000 \
   model.encoder.use_lidar_bias_train=true \
   model.encoder.use_lidar_bias_test=true \
   wandb.name=E111_s111123 \
@@ -120,15 +162,17 @@ E011: '~loss.lidar_inverse_depth'
 E111: 无额外覆盖
 ```
 
-所有组可统一保留 `dataset.load_lidar_depth=true`，便于同一权重的 test=true 评测和数据检查；E000/E010 训练时不使用 LiDAR 数值。若另测纯视觉部署效率，应关闭其 LiDAR 加载，单独注明数据预处理条件。先用 `--cfg job` 核对每组最终 loss 列表和开关，再做短程冒烟验证。
+E000/E010 训练不需要 LiDAR，应额外覆盖 `dataset.load_lidar_depth=false`，避免无用读取和投影；其余训练组 D 或 B_train 至少启用一项，保持 true。正式训练统一 `model.encoder.frozen_params=[]`、60000步和每2000步保存 checkpoint，不能沿用历史 baseline 的默认2000步和保存频率。
+
+所有 test1 必须 `dataset.load_lidar_depth=true`。test0 可关闭 LiDAR 加载，即使配置保留 D，当前 `test_step` 也不执行训练 loss；若额外执行训练/反向检查则不能在 D 启用时关闭加载。先用 `--cfg job` 核对每组最终 loss 列表和开关，再做短程冒烟验证。`full_shared` 的默认 `wandb.name/tags` 仍写着 baseline/visual_only，不能据此判断是否使用 LiDAR，每组须设置正确名称并记录 resolved config。
 
 ### 5.3 每个 checkpoint 评测两次
 
-对每组使用对应训练配置（包括相同的 loss 删除覆盖）及同一个60000步 checkpoint。下面以 E111_test0 为例；第二次改 test 开关为 true，并将所有输出名称改为 test1：
+对每组使用对应训练配置（包括相同的 loss 删除覆盖）及同一个60000步 checkpoint。下面以 E111_test0 为例；第二次改 test 开关和 dataset.load_lidar_depth 为 true，并将所有输出名称改为 test1。checkpoint 路径为占位符，需替换为实际文件：
 
 ```bash
 python -m src.main +experiment=full_shared mode=test \
-  dataset.version=v1.0-trainval dataset.load_lidar_depth=true \
+  dataset.version=v1.0-trainval dataset.load_lidar_depth=false \
   checkpointing.load=/absolute/path/to/E111_step60000.ckpt \
   model.encoder.use_lidar_bias_train=true \
   model.encoder.use_lidar_bias_test=false \
@@ -153,33 +197,35 @@ python -m src.main +experiment=full_shared mode=test \
 ## 6. 统一训练与评测口径
 
 - 所有训练组固定60000步、batch size=2、lr=1e-4、相同 seed、初始化及调度；不要从 E111 继续训练其他消融。当前 cosine_lr=true 使用 OneCycleLR（total_steps=max_steps+10、pct_start=0.01），此路径不使用 warm_up_steps=500。
-- 当前 YAML max_steps=60000。cosine 下“60000 调度中的第40000步”不等于“40000 总步数调度末尾”。历史曲线需补档；新对照必须统一完整调度。
+- 当前 `full_shared` YAML max_steps=60000，历史分支 `baseline.yaml` 为2000。cosine 下“60000 调度中的第40000步”不等于“40000 总步数调度末尾”。历史曲线需补档；新对照必须统一完整调度。
 - 完整数据更大，相同步数覆盖次数更少。第一轮后统一检查开发集曲线和累计样本覆盖，若需延长，统一增加关键对照预算并重新说明调度，不能只延长偏好的模型。
 - 固定步数结果为主；若报告最佳 checkpoint，统一开发集指标和选择规则，最终报告集不用于选模。
 - 优先单 seed 筛选，预算允许后 E111/E000 和关键消融至少补3个 seed，报告均值及波动。
-- PSNR/SSIM/LPIPS 三项都报告；当前 test_step 计算整图指标，训练的动态 mask 不意味着测试指标也做了 mask。静态区域分数如新增，单独命名并明确算法；LPIPS 不能简单将动态区涂黑后当作标准指标。
-- 增加逐相机和逐场景汇总，保存每样本身份和指标；先核查当前分数文件是否含稳定样本ID，缺少则补齐再做配对分析。
-- 深度报告硬替换前网络预测的 AbsRel、RMSE 等；硬替换后 LiDAR 点误差可能被人为置零，不能代表网络学到了深度。尽量留出未参与输入/监督的点做独立几何验证。
+- PSNR/SSIM/LPIPS 三项都报告；当前 `test_step` 计算整图指标，且不执行训练 loss；context 动态 mask 不用于测试指标。静态区域分数如新增，单独命名并明确算法；LPIPS 不能简单将动态区涂黑后当作标准指标。
+- 增加逐相机和逐场景汇总，保存每样本身份和指标；当前 `scores_psnr_all.json`、`scores_ssim_all.json`、`scores_lpips_all.json` 只保存按迭代顺序排列的分数列表，不包含稳定样本ID；需补齐身份记录后再做配对分析，不能仅靠列表下标跨运行配对。
+- 待新增独立深度评测：当前 `test_step` 不输出 LiDAR loss、AbsRel 或 RMSE，train 的 `loss/lidar_inverse_depth` 也不是独立几何指标。深度报告硬替换前网络预测的 AbsRel、RMSE 等；硬替换后 LiDAR 点误差可能被人为置零，不能代表网络学到了深度。尽量留出未参与输入/监督的点做独立几何验证。
 - 固定场景输出 GT/E111/E000/消融及误差图，关注远处结构、深度边缘、遮挡、细杆和运动区域。保存相同相机和窗口，禁止只挑有利样本。
 
 ### 6.1 训练与推理时长：必测项
 
 正式8组训练均记录训练耗时，16组测试均记录推理耗时，与质量指标一起交付。功能验证无需跑满60000步；稳定阶段速度可独立短程测量，完整训练总时长随正式训练记录。
 
-**训练：**
+#### 训练耗时
 
 - 记录完整60000步训练的实际墙钟时间（小时），包括数据读取、前向、loss、反向、优化器更新和按统一频率保存 checkpoint。启动/数据索引/加载权重时间另外记录；恢复训练需累加各段实际运行时间，不含停机等待。
 - 另测稳定阶段平均 ms/optimizer step、samples/s，以及峰值显存。建议前100步预热，随后至少计时500步；所有组使用相同区间、batch size、梯度累积和 checkpoint 频率。计时窗口是否包含保存 checkpoint 要注明。
 - context loss 增加的 context 渲染属于训练代价，应纳入。关闭项从 loss 列表删除，不能仅设 weight=0 后将无效计算算作该组必要开销。
 
-**推理：**
+#### 推理耗时
 
 - 模型时间：分别测 encoder（包含 Gaussian 构建）、decoder（渲染一个 target）及编码到渲染完成的总延迟，单位 ms/sample；batch size=1，一个 sample 为同相机两张 context 输入、一个 target 输出。
 - 完整流程：另测包含图像读取、LiDAR 读取与投影、数据预处理、CPU→GPU传输和模型执行的耗时/吞吐，写清边界。单独列出一次性模型加载和数据索引构建时间。无需 LiDAR 的 test0 计时运行应关闭 LiDAR 加载；保留加载的统一数据质量评测结果不能当作纯视觉部署开销。
 - 计时单独运行，关闭 PSNR/SSIM/LPIPS、保存图片和视频，不把评测器计算或磁盘输出算作模型推理。建议先预热20个样本，随后固定相同的至少200个窗口，重复3次，报告均值、中位数、P95和吞吐。
 - 单目标场景的推理 FPS 可由稳定总推理时间换算，不能只用 decoder 时间宣称整套模型 FPS；也不能将六路独立样本吞吐解释成六相机同步重建 FPS。
 
-**计时实现与环境：**
+#### 计时实现与环境
+
+当前 `test.eval_time_skip_steps=5` 仅在 compute_scores=true 的分支中记录用于汇总的跳过数量，不控制模型预热；关闭指标后的专用计时必须自行预热。`benchmark.json`、`peak_memory.json` 在关闭指标时也会输出。当前没有训练总时长、分位数和端到端耗时的完整自动统计。
 
 当前 `src/misc/benchmarker.py` 使用 CPU wall clock 包围 GPU调用，未显式同步 CUDA；现有 `benchmark.json` 仅作参考，不能直接认定为准确 GPU 时长。下一位同学需实现专用计时：模型阶段使用 CUDA Events 并在读取结果前同步；完整流程/训练窗口用 perf_counter，边界同步 CUDA。批量计时窗口避免每步强制同步扰动吞吐。阶段拆分计时与总吞吐可以分开测量。
 
@@ -203,10 +249,54 @@ python -m src.main +experiment=full_shared mode=test \
 
 ## 8. 交付清单与记录模板
 
-每组交付：git commit、完整 resolved config（含 .hydra/config.yaml 和 overrides）、环境版本、启动命令、seed、split 场景列表、样本数、初始化和最终 checkpoint 路径、训练日志、原始分数JSON、训练/推理原始计时记录与统计脚本、汇总表与固定可视化。先确认历史 full_shared 40000 checkpoint 的实际路径，本文不虚构路径。
+下列记录中，逐样本身份、独立深度误差、准确GPU计时和端到端/训练计时尚需补充实现，不能把要求当作现有输出。
+
+### 8.1 每组交付材料
+
+- [ ] **代码与配置**：git commit、完整 resolved config（含 `.hydra/config.yaml` 和 overrides）。
+- [ ] **运行条件**：环境版本、启动命令、seed。
+- [ ] **数据记录**：split 场景列表、样本数。
+- [ ] **权重与日志**：初始化和最终 checkpoint 路径、训练日志。
+- [ ] **评测与计时**：原始分数 JSON、训练/推理原始计时记录与统计脚本。
+- [ ] **展示材料**：汇总表与固定可视化。
+
+先确认历史 `full_shared` 40000 checkpoint 的实际路径，本文不虚构路径。
+
+### 8.2 实验记录表
 
 | ID/test开关/seed | commit | 数据/split | steps/调度 | checkpoint | PSNR | SSIM | LPIPS | 原始深度误差 | 输出目录 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 待填写 | | | | | | | | | |
 
-结束第一轮时回答：完整数据上 E111 是否优于 E000？收益主要来自哪一项？去掉测试 LiDAR 后还保留多少？六路相机是否一致？几何改善与渲染改善是否一致？无法支持的结论如实保留。
+### 8.3 第一轮需要回答的问题
+
+1. 完整数据上，E111 是否优于 E000？
+2. 收益主要来自哪一项？
+3. 去掉测试 LiDAR 后还保留多少收益？
+4. 六路相机是否一致？
+5. 几何改善与渲染改善是否一致？
+
+无法支持的结论如实保留。
+
+## 9. 执行时间表
+
+**截止目标：2026 年 11 月 29 日前完成全部消融实验与结果交付，11 月 30 日作为最终截止日。** 第一轮完整覆盖每个 seed 的 8 组训练、16 组评测；第二轮扩展消融安排在第一轮之后。以下按单 seed 主实验排期，多 seed 补充视实测算力安排，不替代任何必做组。
+
+| 日期 | 工作安排 | 阶段交付与验收 |
+| --- | --- | --- |
+| 11 月 1—3 日 | 准备 trainval 数据及环境；修复本地 test 使用官方 val 的划分；核对各组配置与场景集合 | 数据可读、train/val 场景不相交、评测非空；保存场景列表、样本数和 resolved config |
+| 11 月 4—5 日 | 完成数据、前向、反向和短程稳定性检查；补充逐样本指标记录、独立深度评测与计时脚本 | 各开关和梯度路径正确；动态 LiDAR 已过滤；得到实测 ms/step、显存和单组训练时长估计 |
+| 11 月 6—10 日 | 优先完成 E000、E111 的 60000 步训练，各自执行 test0/test1 评测；其余已验证配置可按资源提前启动 | 2 组训练、4 组评测；确认完整方案和纯视觉基线均能完成全流程 |
+| 11 月 11—18 日 | 完成 E100、E010、E110、E001、E101、E011 的 60000 步训练，并随完成进度执行双开关评测 | 累计完成全部 8 组训练、16 组评测；保存 checkpoint、日志和原始分数 |
+| 11 月 19—21 日 | 完成训练/推理耗时统计、逐相机与逐场景汇总、深度误差和固定样本可视化 | 第一轮完整结果表；检查异常、缺失记录及配对关系，列出需要重跑的任务 |
+| 11 月 22—25 日 | 进行第二轮扩展消融：优先同一 E111 权重下的 LiDAR 稀疏度敏感性；安排深度/context 权重实验及关键对照多 seed 补充 | 第二轮单独成表；11 月 21 日前按实测预算锁定重训练组数，所有确认纳入的消融均须在截止前完成 |
+| 11 月 26—28 日 | 预留失败重跑和补测；核对全部实验的训练步数、输入条件、指标与计时口径 | 消除缺项；完成所有纳入范围的消融训练与评测，不再新增实验组 |
+| 11 月 29 日 | 整理结论、汇总表、可视化、复现命令和交付材料 | 完成第 8 节交付清单；全部消融实验结束 |
+| 11 月 30 日 | 最终复核与交接 | 检查文件、路径和记录可访问；不安排新的长程训练 |
+
+### 排期执行规则
+
+- **11 月 5 日前核算算力**：用实测单组训练时长计算 8 组训练、16 组评测及扩展实验的总 GPU 小时，预留失败重跑时间。并行任务按可用 GPU 和显存安排，计时实验独占测量资源；资源不足时及时落实额外算力。
+- **第一轮优先**：不得为赶时间缩短某组的 60000 步预算、漏掉训练组合，或省略 test0/test1 中的一次评测。数据准备、脚本开发和结果整理可与已验证的训练任务交错推进。
+- **扩展范围提前确定**：第 7 节中的权重重训练、多 seed、外部方法复现与第二数据集工作量差异较大；11 月 21 日前根据第一轮结果和剩余算力明确本月范围。未纳入的探索项登记为后续工作，不能标记为已完成。
+- **每天更新实验台账**：记录组别、seed、运行状态、当前步数、预计完成时间、输出目录和失败原因。11 月 18 日检查第一轮是否全部完成，11 月 25 日冻结新增任务，最后几天用于补齐和复核。
