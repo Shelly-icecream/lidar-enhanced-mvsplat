@@ -4,7 +4,7 @@ defaults:
   - override /dataset: nuscenes
   - override /model/encoder: costvolume
   # Target RGB reconstruction loss.
-  - override /loss: [mse]
+  - override /loss: [mse, lpips]
 
 wandb:
   name: baseline
@@ -54,6 +54,11 @@ model:
       - depth_predictor.refine_unet
       - depth_predictor.to_disparity
       - depth_predictor.to_gaussians
+
+loss:
+  lpips:
+    weight: 0.05
+    apply_after_step: 0
 
 # ----- optimizer / lr -----
 optimizer:
