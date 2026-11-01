@@ -1,14 +1,20 @@
 # full_shared 接力棒：数据扩展与消融实验
 ## 1. 分支说明
 main分支是完整实验方案，baseline_depth_error分支是仅把mvsplat应用场景迁移后的代码，可以用于做消融实验，full_shared分支内容和main是一样的，其余分支是尝试过的方案暂时不管。
+
 等你搭好环境和跑通评测时，我会把你加为这个项目的contributor，修改可以push到full_shared分支上，main分支用来保存可行版本，如果遇到错误可以回退。
+
 看到markdown中没有说清楚的地方可以直接在群里问，不要猜想。
 
 ## 2. 消融实验步骤
 1.检查代码逻辑是否有明显错误，可以边做实验边做检查
+
 2.对比full_shared和baseline_depth_error除了新增加的loss、lidar bias是否还有别的不同，这些不同一定要向full_shared对齐
+
 3.扩大数据集，现在还是mini数据集，你需要在nuscenes官方网站上找到完整数据集下载和使用，应该是要注册一个账号，数据集用于学习是可以的。
+
 4.建立同预算纯视觉微调对照，再解释LiDAR监督、硬替换和context重建的贡献。
+
 5.指标：psnr、lpips、ssim、推理时间、训练时间、lidar_loss
 要留意深度是否截断
 

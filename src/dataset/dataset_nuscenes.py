@@ -273,8 +273,8 @@ class DatasetNuScenes(IterableDataset):
 
         return items
 
-    def _load_lidar_depth(self, sample_token, camera_token, intrinsics, shape):
-        """Project single-sweep LiDAR into the cropped image; zero means missing."""
+    def _load_lidar_depth(self, sample_token, camera_token, intrinsics, shape, dynamic_mask):
+        """Project static single-sweep LiDAR; missing/dynamic pixels remain zero."""
         sample = self.nusc.get("sample", sample_token)
         points, z, _ = self.nusc.explorer.map_pointcloud_to_image(
             sample["data"]["LIDAR_TOP"], camera_token
@@ -288,6 +288,10 @@ class DatasetNuScenes(IterableDataset):
         x = np.floor(xy[0] * w).astype(np.int64)
         y = np.floor(xy[1] * h).astype(np.int64)
         valid = np.isfinite(z) & (z > 0) & (x >= 0) & (x < w) & (y >= 0) & (y < h)
+        # Discard dynamic-box points before rasterizing the context depth map.
+        point_indices = np.flatnonzero(valid)
+        static = dynamic_mask.squeeze(0).cpu().numpy() < 0.5
+        valid[point_indices] &= static[y[point_indices], x[point_indices]]
         depth = np.full(h * w, np.inf, dtype=np.float32)
         # Retain the nearest surface when several points land in one pixel.
         np.minimum.at(depth, y[valid] * w + x[valid], z[valid])
@@ -379,73 +383,27 @@ class DatasetNuScenes(IterableDataset):
             }
 
             example = apply_crop_shim(example, tuple(self.cfg.image_shape))
+            # Only context annotations are used for dynamic masks. RGB remains
+            # untouched for global feature extraction and cost-volume construction.
+            example["context"]["dynamic_mask"] = torch.stack([
+                self._project_dynamic_mask_to_camera(
+                    sample_token=sample_token,
+                    camera_sd_token=camera_sd_tokens[i],
+                    K_norm=example["context"]["intrinsics"][i],
+                    image_shape=tuple(example["context"]["image"].shape[-2:]),
+                )
+                for i, sample_token in enumerate(context_sample_tokens)
+            ], dim=0)
             if self.cfg.load_lidar_depth:
                 example["context"]["lidar_depth"] = torch.stack([
                     self._load_lidar_depth(
                         token, camera_sd_tokens[i],
                         example["context"]["intrinsics"][i],
                         tuple(example["context"]["image"].shape[-2:]),
+                        example["context"]["dynamic_mask"][i],
                     ) for i, token in enumerate(context_sample_tokens)
                 ])
 
-            # Build masks at the final image resolution. RGB remains untouched so
-            # visual features and the cost volume are still computed globally.
-            dynamic_masks = []
-            for view_idx, sample_token in enumerate(sample_tokens):
-                height, width = (
-                    example["context"]["image"][0].shape[-2:]
-                    if view_idx < num_context
-                    else example["target"]["image"][0].shape[-2:]
-                )
-                views = "context" if view_idx < num_context else "target"
-                local_idx = (
-                    view_idx if views == "context" else view_idx - num_context
-                )
-                dynamic_masks.append(
-                    self._project_dynamic_mask_to_camera(
-                        sample_token=sample_token,
-                        camera_sd_token=camera_sd_tokens[view_idx],
-                        K_norm=example[views]["intrinsics"][local_idx],
-                        image_shape=(height, width),
-                    )
-                )
-
-            example["context"]["dynamic_mask"] = torch.stack(
-                dynamic_masks[:num_context], dim=0
-            )
-            target_dynamic_masks = dynamic_masks[num_context:]
-
-            # A target pixel is unsafe for reconstruction supervision when a
-            # moving object occupies it at the target time or when a moving
-            # object from either context time projects there in the target
-            # camera.  Reproject the context-time 3D annotation boxes into
-            # every target view and take the union.  This conservatively masks
-            # temporal motion/occlusion regions instead of masking only the
-            # moving object's target-time location.
-            for target_idx in range(len(target_sample_tokens)):
-                target_camera_idx = num_context + target_idx
-                target_image = example["target"]["image"][target_idx]
-                target_height, target_width = target_image.shape[-2:]
-                target_camera_sd_token = camera_sd_tokens[target_camera_idx]
-                target_intrinsics = example["target"]["intrinsics"][target_idx]
-
-                union_mask = target_dynamic_masks[target_idx]
-                for context_sample_token in context_sample_tokens:
-                    context_mask_in_target = self._project_dynamic_mask_to_camera(
-                        sample_token=context_sample_token,
-                        camera_sd_token=target_camera_sd_token,
-                        K_norm=target_intrinsics,
-                        image_shape=(target_height, target_width),
-                    )
-                    union_mask = torch.maximum(
-                        union_mask,
-                        context_mask_in_target,
-                    )
-                target_dynamic_masks[target_idx] = union_mask
-
-            example["target"]["dynamic_mask"] = torch.stack(
-                target_dynamic_masks, dim=0
-            )
             # Keep projected dynamic masks aligned with augmented RGB images.
             if self.stage == "train" and self.cfg.augment:
                 example = apply_augmentation_shim(example)
