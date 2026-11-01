@@ -1,10 +1,9 @@
 # @package _global_
-# Visual-only baseline: load the pretrained RE10K checkpoint on nuScenes with
-# LiDAR depth bias and both LiDAR adapters disabled.
+# Visual-only baseline: load the pretrained RE10K checkpoint on nuScenes.
 defaults:
   - override /dataset: nuscenes
   - override /model/encoder: costvolume
-  # Keep a typed-config placeholder. Adapter-loss mode skips this global loss.
+  # Target RGB reconstruction loss.
   - override /loss: [mse]
 
 wandb:
@@ -35,9 +34,6 @@ trainer:
 # ----- model params -----
 model:
   encoder:
-    use_lidar_gaussian_adapter: false
-    use_lidar_gaussian_adapter_loss: false
-
     num_depth_candidates: 128
     costvolume_unet_feat_dim: 128
     costvolume_unet_channel_mult: [1, 1, 1]
@@ -93,19 +89,16 @@ dataset:
   frame_stride: 1
 
 train:
-  use_lidar_bias: false
   depth_mode: null
   extended_visualization: false
   print_log_every_n_steps: 50
 
 test:
-  use_lidar_bias: false
   output_path: outputs/test
   eval_time_skip_steps: 5
   compute_scores: true
   save_image: true
   save_video: false
-  save_lidar_alpha_diagnostics: false
 
 checkpointing:
   load: checkpoints/re10k.ckpt
