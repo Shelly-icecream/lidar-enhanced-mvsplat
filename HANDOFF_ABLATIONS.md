@@ -132,59 +132,13 @@ ID 三位依次表示 D、C、B_train。报告结果时增加后缀 `_test0` / `
 
 建议先完成 E000/E111，再补齐其他6组；全部均为必做，不用逐项移除的少数组合替代完整矩阵。现有 mini 60000总步数训练中取出的40000步结果只作历史参考；新表统一使用60000步 checkpoint，mini 与 trainval 分表。
 
-### 5.2 训练命令及各组覆盖
+### 5.2 每个 checkpoint 评测两次
 
-入口为 `config/experiment/full_shared.yaml`。完整数据离线评测必须先完成第4节 split 修复。
-
-```bash
-# E111：完整方案
-python -m src.main +experiment=full_shared mode=train \
-  dataset.version=v1.0-trainval dataset.load_lidar_depth=true \
-  checkpointing.load=checkpoints/re10k.ckpt checkpointing.resume=false \
-  trainer.max_steps=60000 seed=111123 train.run_validation=false \
-  model.encoder.frozen_params=[] checkpointing.every_n_train_steps=2000 \
-  model.encoder.use_lidar_bias_train=true \
-  model.encoder.use_lidar_bias_test=true \
-  wandb.name=E111_s111123 \
-  hydra.run.dir=outputs/ablations/trainval/E111_s111123
-```
-
-其余组替换运行名称和目录，并增加以下覆盖；删除 loss 用 Hydra 的 `~` 语法，避免仅置零却仍执行 context 渲染：
-
-```text
-E000: '~loss.lidar_inverse_depth' '~loss.context_rgb' model.encoder.use_lidar_bias_train=false
-E100: '~loss.context_rgb' model.encoder.use_lidar_bias_train=false
-E010: '~loss.lidar_inverse_depth' model.encoder.use_lidar_bias_train=false
-E110: model.encoder.use_lidar_bias_train=false
-E001: '~loss.lidar_inverse_depth' '~loss.context_rgb'
-E101: '~loss.context_rgb'
-E011: '~loss.lidar_inverse_depth'
-E111: 无额外覆盖
-```
-
-E000/E010 训练不需要 LiDAR，应额外覆盖 `dataset.load_lidar_depth=false`，避免无用读取和投影；其余训练组 D 或 B_train 至少启用一项，保持 true。正式训练统一 `model.encoder.frozen_params=[]`、60000步和每2000步保存 checkpoint，不能沿用历史 baseline 的默认2000步和保存频率。
-
-所有 test1 必须 `dataset.load_lidar_depth=true`。test0 可关闭 LiDAR 加载，即使配置保留 D，当前 `test_step` 也不执行训练 loss；若额外执行训练/反向检查则不能在 D 启用时关闭加载。先用 `--cfg job` 核对每组最终 loss 列表和开关，再做短程冒烟验证。`full_shared` 的默认 `wandb.name/tags` 仍写着 baseline/visual_only，不能据此判断是否使用 LiDAR，每组须设置正确名称并记录 resolved config。
-
-### 5.3 每个 checkpoint 评测两次
-
-对每组使用对应训练配置（包括相同的 loss 删除覆盖）及同一个60000步 checkpoint。下面以 E111_test0 为例；第二次改 test 开关和 dataset.load_lidar_depth 为 true，并将所有输出名称改为 test1。checkpoint 路径为占位符，需替换为实际文件：
-
-```bash
-python -m src.main +experiment=full_shared mode=test \
-  dataset.version=v1.0-trainval dataset.load_lidar_depth=false \
-  checkpointing.load=/absolute/path/to/E111_step60000.ckpt \
-  model.encoder.use_lidar_bias_train=true \
-  model.encoder.use_lidar_bias_test=false \
-  wandb.name=E111_test0_s111123 \
-  test.compute_scores=true test.save_image=false \
-  test.output_path=outputs/ablations/evaluation \
-  hydra.run.dir=outputs/ablations/evaluation_runs/E111_test0_s111123
-```
+对每组使用对应训练配置（包括相同的 loss 删除覆盖）及同一个60000步 checkpoint。
 
 训练开关在 eval 模式不生效，测试由 use_lidar_bias_test 决定。所有16组使用同一评测 split、窗口和指标。输出目录为 `test.output_path / wandb.name`；禁止覆盖旧结果。
 
-### 5.4 需要回答的问题
+### 5.3 需要回答的问题
 
 - 基础微调收益：R0 对比 E000_test0。
 - D贡献：固定 C、B_train、B_test，对比 D有/无的配对结果。
@@ -244,8 +198,26 @@ python -m src.main +experiment=full_shared mode=test \
 1. LiDAR 稀疏度：100%/50%/25%/10% 点。先做同一 E111 权重的推理敏感性；重新训练的稀疏度实验另表。固定抽样种子、每帧点子集，所有方法共享；保留独立完整点集作几何评测，避免指标随抽样改变。
 2. 深度权重：0.1/1/10，或 context 权重0.1/0.5/1。一次只改变一类权重；不是第一轮必做项。
 3. 若发现硬替换使深度边缘或遮挡处变差，先量化失败，再考虑置信度融合或属性联合修正。不要为了创新堆模块。
-4. 外部对照：调研 DrivingForward、ADGaussian 及近期公开方法的可复现性。明确相机数、LiDAR、已知位姿、动态标注和分辨率差异，不能直接抄不同协议的论文指标做排名。
+4. 外部模型对比：以 **DepthSplat 迁移到自动驾驶场景**为重点，按第 7.1 节独立复现并进行场景适配训练；DrivingForward、ADGaussian 等方法可作为后续调研对象。明确相机数、LiDAR、已知位姿、动态标注和分辨率差异，不能直接抄不同协议的论文指标做排名。
 5. 预算允许时在第二数据集或第二前馈骨干验证迁移；不作为启动第一轮的前置条件。
+
+### 7.1 外部模型对比：DepthSplat 自动驾驶场景迁移
+
+**目的**：将 DepthSplat 迁移到 nuScenes 自动驾驶场景，与本项目的 LiDAR 方案比较，回答在统一任务和训练预算下，LiDAR 信息与单目深度特征分支哪一种更有助于几何恢复和新视角渲染。实验前不预设哪一种更好。
+
+**代码边界**：外部模型必须基于 DepthSplat 官方仓库独立实现和运行，**不能使用本仓库的代码**，包括模型、数据加载、训练、渲染和评测实现。所需 nuScenes 数据适配、训练入口及评测逻辑均在外部仓库中独立完成。可以共享原始数据、场景划分清单、样本清单和评测协议，以保证比较条件一致；记录外部仓库地址、commit、配置及独立修改内容。
+
+**迁移后必须进行场景适配训练**：不能仅用原始预训练权重在 nuScenes 上直接推理，就据此判断单目深度特征分支的效果。先验证数据、相机参数、位姿、深度约定及渲染链路，再在相同 nuScenes 官方 train 场景上微调，并在统一官方 val 场景上评测。直接推理结果只作为迁移前参考，正式比较使用适配训练后的 checkpoint。主对比沿用 60000 optimizer steps 及相同有效 batch size，记录初始化来源、可训练参数、优化器和学习率调度；存在无法对齐的设置时需明确说明。
+
+| 对照项 | 训练与测试条件 | 用途 |
+| --- | --- | --- |
+| 本项目 E000_test0 | 同预算场景适配训练；纯视觉输入 | 衡量本项目纯视觉基线 |
+| DepthSplat 适配模型 | 独立官方实现；完成场景适配训练；保留其单目深度特征分支，训练与测试不使用 LiDAR | 衡量单目深度特征路线 |
+| 本项目 LiDAR 方案 | 报告 E100_test0、E111_test0 和 E111_test1，注明训练监督、测试 LiDAR 及动态标注条件 | 区分 LiDAR 训练监督收益与推理输入收益 |
+
+统一场景划分、相机与时序窗口、context/target 数量、分辨率、训练预算及指标定义，报告 PSNR/SSIM/LPIPS、独立深度误差、训练和推理耗时。单目深度模型的预训练数据与权重来源也须记录。E111_test1 使用额外测试传感器信息，其效果和部署代价应一起报告。
+
+**结论边界**：跨模型比较同时包含骨干、预训练和训练目标差异，只能支持两种完整方案在该协议下的效果比较。若要进一步归因于“LiDAR 还是单目深度特征分支”，需在独立的 DepthSplat 仓库内增加受控对照：固定其他设置，分别比较原单目深度特征分支、移除该分支的视觉基线，以及以 LiDAR 信息替代该分支的适配方案；逐项说明 LiDAR 的注入位置、监督方式和测试输入。该组也不得复用本仓库代码。未完成受控对照时，不将跨模型分数差直接解释为某个分支更优。
 
 ## 8. 交付清单与记录模板
 
